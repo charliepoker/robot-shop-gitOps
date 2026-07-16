@@ -1,0 +1,88 @@
+# robot-shop-gitOps/argocd/apps/cert-manager.yaml
+#
+# Deploys cert-manager (controller + webhook + cainjector + CRDs) via
+# the official Helm chart. The ClusterIssuers are NOT here — they live
+# in a separate Application (cert-manager-issuers.yaml) with a later
+# sync-wave, because a ClusterIssuer can't be created until cert-manager's
+# CRDs exist. Splitting them lets Argo CD order it correctly.
+#
+# IAM: Route53 DNS-01 access via EKS Pod Identity, bound to
+# cert-manager/cert-manager by the association in modules/cert-manager.
+# No serviceAccount role annotation — Pod Identity injects ambient creds.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  annotations:
+    # Earlier wave than the issuers app so CRDs + controller are up first.
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  project: default
+
+  source:
+    repoURL: https://charts.jetstack.io
+    chart: cert-manager
+    targetRevision: v1.21.0   # confirm current: helm search repo jetstack/cert-manager --versions
+    helm:
+      values: |
+        # Install and KEEP the CRDs. keep:true means uninstalling the
+        # chart won't delete CRDs (and with them every Certificate/Issuer
+        # object) — the safe production default.
+        crds:
+          enabled: true
+          keep: true
+
+        # cert-manager is a singleton controller; 1 replica is fine for a
+        # portfolio cluster. Prod HA would run 2 with leader election.
+        replicaCount: 1
+
+        # The DNS-01 solver needs to resolve _acme-challenge TXT records
+        # via public DNS during validation. Pointing the self-check at
+        # public resolvers avoids false negatives from split-horizon or
+        # in-cluster DNS caching the pre-propagation state.
+        dns01RecursiveNameservers: "8.8.8.8:53,1.1.1.1:53"
+        dns01RecursiveNameserversOnly: true
+
+        serviceAccount:
+          create: true
+          name: cert-manager
+          # no eks.amazonaws.com/role-arn — Pod Identity supplies creds
+
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+
+        webhook:
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+
+        cainjector:
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # CRDs can exceed the annotation size limit with client-side apply;
+      # server-side apply avoids the "metadata.annotations too long" error.
+      - ServerSideApply=true

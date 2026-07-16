@@ -1,0 +1,42 @@
+# robot-shop-gitOps/argocd/apps/cert-manager-issuers.yaml
+#
+# Deploys the two ClusterIssuers (staging + prod) as raw manifests.
+# Separate from the cert-manager chart Application because these depend
+# on cert-manager's CRDs already existing. The later sync-wave makes
+# Argo CD apply these only after the cert-manager app (wave -5) is Healthy.
+#
+# Assumes the two ClusterIssuer YAMLs live in the gitops repo at
+# argocd/manifests/cert-manager/ — adjust source.path if you put them
+# elsewhere.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager-issuers
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # after cert-manager (wave -5)
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/charliepoker/robot-shop-gitOps.git
+    targetRevision: main
+    path: argocd/manifests/cert-manager
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Retry covers the brief window where cert-manager's webhook isn't
+    # ready yet when the issuers are first applied.
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
