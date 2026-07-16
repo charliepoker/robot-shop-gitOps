@@ -1,0 +1,148 @@
+# robot-shop-gitops/bootstrap/argocd-values.yaml
+#
+# Helm values for argo/argo-cd chart 10.1.3 (Argo CD app v3.4.5)
+# Tuned for a single small EKS cluster (cost-optimized portfolio demo),
+# not a multi-team production install. Every "cost" trade-off below is
+# called out so you can speak to it in an interview.
+
+global:
+  # Domain conventions for cert-manager / external-dns annotations
+  # applied per-component below.
+  domain: argocd.devopsportfolio.com
+
+## ---------------------------------------------------------------
+## Redis: single instance, no Sentinel/HA.
+## Prod would run redis-ha (3 pods) for controller/server cache
+## resilience; here a single pod is fine since a restart just
+## costs a brief UI cache miss, not app downtime (Argo CD is not
+## in the data path of the apps it manages).
+## ---------------------------------------------------------------
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+redis-ha:
+  enabled: false
+
+## ---------------------------------------------------------------
+## Application Controller: reconciliation loop + resource tree.
+## Single replica (HA prod setup would run 2+ with leader election
+## via --enable-application-controller-ha, but that's overkill for
+## one cluster with ~10-15 Applications).
+## ---------------------------------------------------------------
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+## ---------------------------------------------------------------
+## Repo Server: clones/renders manifests (helm template, kustomize
+## build, etc). This is the component most sensitive to being
+## starved on CPU during large syncs, so it gets its own line item
+## even at replicas: 1.
+## ---------------------------------------------------------------
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+## ---------------------------------------------------------------
+## API Server / UI. Exposed via ALB Ingress (AWS Load Balancer
+## Controller) + ACM wildcard cert from the acm module, with the
+## hostname registered by ExternalDNS. TLS terminates at the ALB,
+## so the server itself runs --insecure (plain HTTP) behind it —
+## standard pattern, not a security gap, since traffic never
+## leaves the VPC unencrypted at the ALB->pod hop on EKS with
+## proper security groups. Flag this explicitly if asked.
+## ---------------------------------------------------------------
+server:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/certificate-arn: "" # set via CI/CD or external-secrets lookup, or drop if using ACM auto-discovery by hostname
+      external-dns.alpha.kubernetes.io/hostname: argocd.devopsportfolio.com
+    hosts:
+      - argocd.devopsportfolio.com
+
+## ---------------------------------------------------------------
+## ApplicationSet controller: not used here. The App-of-Apps
+## pattern (root-app.yaml -> apps/*.yaml) covers this cluster's
+## needs without the extra controller pod. Worth mentioning as
+## "the alternative" if asked to compare approaches.
+## ---------------------------------------------------------------
+applicationSet:
+  enabled: false
+
+## ---------------------------------------------------------------
+## Dex (SSO): disabled by default to keep the footprint minimal.
+## Left here as a documented toggle — flip enabled: true and add
+## a connectors block (GitHub OAuth) to demonstrate SSO without
+## standing up a full IdP for a portfolio project.
+## ---------------------------------------------------------------
+dex:
+  enabled: false
+  # connectors:
+  #   - type: github
+  #     id: github
+  #     name: GitHub
+  #     config:
+  #       clientID: $dex.github.clientId
+  #       clientSecret: $dex.github.clientSecret
+  #       orgs:
+  #         - name: charliepoker
+
+## ---------------------------------------------------------------
+## Notifications controller: disabled to save a pod. In prod this
+## drives Slack/PagerDuty alerts on sync failure — worth having a
+## one-liner ready: "I'd wire notifications.argoproj.io triggers
+## to a Slack webhook stored in Secrets Manager via External
+## Secrets, keyed off on-sync-failed and on-health-degraded."
+## ---------------------------------------------------------------
+notifications:
+  enabled: false
+
+configs:
+  cm:
+    url: https://argocd.devopsportfolio.com
+    timeout.reconciliation: 180s
+    # Application controller re-diffs Git vs live state on this
+    # interval even without a webhook; webhooks (configured on the
+    # GitHub repo -> Argo CD server) make sync near-instant instead
+    # of waiting out this poll interval.
+
+  params:
+    server.insecure: "true" # TLS terminates at the ALB, see ingress block above
+
+  rbac:
+    policy.default: role:readonly
+    policy.csv: |
+      p, role:admin, applications, *, */*, allow
+      p, role:admin, clusters, get, *, allow
+      g, charliepoker, role:admin

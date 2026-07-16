@@ -1,0 +1,63 @@
+# robot-shop-gitOps/argocd/apps/aws-lb-controller.yaml
+#
+# Deploys the AWS Load Balancer Controller via the official eks-charts
+# Helm chart. This is what turns Ingress objects (like argocd-server's)
+# into real ALBs. It's given an early sync-wave so it lands before
+# workload-tier apps that assume an Ingress controller already exists
+# — root-app itself doesn't need this (the ArgoCD control plane runs
+# fine without it, as you saw via port-forward), but robot-shop and
+# anything else with an Ingress does.
+#
+# IAM: authenticated via EKS Pod Identity, bound to
+# kube-system/aws-load-balancer-controller by the
+# aws_eks_pod_identity_association in modules/aws-lb-controller
+# (Terraform side). No IRSA annotation needed on the ServiceAccount —
+# Pod Identity is a cluster-level namespace+SA -> role mapping, not a
+# per-object annotation.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-lb-controller
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  project: default
+
+  source:
+    repoURL: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    targetRevision: 3.4.1   # confirm current with: helm search repo eks/aws-load-balancer-controller --versions
+    helm:
+      values: |
+        clusterName: robot-shop     # must exactly match your EKS cluster_name / var.cluster_name
+        region: us-east-1           # set to your actual cluster region
+        vpcId: ""                   # optional — auto-discovered from the node's ENI metadata if left blank
+
+        serviceAccount:
+          create: true
+          name: aws-load-balancer-controller
+          # no eks.amazonaws.com/role-arn annotation — Pod Identity
+          # resolves the role from the cluster-level association,
+          # not from an SA annotation like IRSA requires.
+
+        replicaCount: 1   # single replica is fine for a portfolio cluster; prod would run 2 for controller HA during node drains
+
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # kube-system always exists

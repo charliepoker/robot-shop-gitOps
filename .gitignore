@@ -1,0 +1,45 @@
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs and temp files
+*.log
+*.tmp
+tmp/
+.tmp/
+
+# Editors
+.vscode/
+.idea/
+
+# Python / local virtual envs
+.venv/
+venv/
+env/
+__pycache__/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+
+# Local kube config / cluster artifacts
+.kube/
+kubeconfig*
+
+# Build / generated artifacts
+build/
+dist/
+coverage/

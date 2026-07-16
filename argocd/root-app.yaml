@@ -1,0 +1,84 @@
+# robot-shop-gitops/bootstrap/root-app.yaml
+#
+# The "App of Apps" root. This is the ONLY resource you ever
+# kubectl apply by hand. Every other Application in this cluster
+# (robot-shop services, cert-manager, external-dns, external-secrets,
+# prometheus, grafana, velero, argo-rollouts, ...) is defined as its
+# own Application manifest under apps/ in this same repo, and this
+# root Application is what discovers and creates them.
+#
+# Adjust source.repoURL / path / targetRevision to match the actual
+# layout of robot-shop-gitops if it differs from apps/.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-app
+  namespace: argocd
+  # Cascading delete: deleting root-app deletes every child
+  # Application it created (and, per each child's own syncPolicy,
+  # their managed resources too). Good talking point on blast
+  # radius / how you'd tear the whole demo down cleanly.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: bootstrap
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/charliepoker/robot-shop-gitops.git
+    targetRevision: main
+    path: apps
+    directory:
+      recurse: true   # picks up Application manifests nested in subfolders (e.g. apps/platform/, apps/observability/)
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Children are Application CRDs, which are namespaced resources
+    # that live in argocd's namespace regardless of which namespace
+    # the workloads they describe end up in.
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true      # deleting a child Application file in Git deletes it (and cascades to its resources) from the cluster
+      selfHeal: true    # any manual kubectl edit/delete drifting from Git gets reverted automatically — this is the core GitOps guarantee
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+# Example child Application (apps/robot-shop.yaml) for reference —
+# this is the shape every file under apps/ follows. Not applied by
+# this file directly; shown here so the pattern is clear end-to-end.
+#
+# apiVersion: argoproj.io/v1alpha1
+# kind: Application
+# metadata:
+#   name: robot-shop
+#   namespace: argocd
+#   annotations:
+#     argocd.argoproj.io/sync-wave: "10"   # ordering: platform components (cert-manager, external-secrets) sync in earlier waves
+# spec:
+#   project: default
+#   source:
+#     repoURL: https://github.com/charliepoker/robot-shop-gitops.git
+#     targetRevision: main
+#     path: workloads/robot-shop
+#   destination:
+#     server: https://kubernetes.default.svc
+#     namespace: robot-shop
+#   syncPolicy:
+#     automated:
+#       prune: true
+#       selfHeal: true
+#     syncOptions:
+#       - CreateNamespace=true
