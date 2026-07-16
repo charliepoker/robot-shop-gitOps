@@ -29,7 +29,7 @@ spec:
   source:
     repoURL: https://github.com/charliepoker/robot-shop-gitops.git
     targetRevision: main
-    path: apps
+    path: argocd/apps
     directory:
       recurse: true   # picks up Application manifests nested in subfolders (e.g. apps/platform/, apps/observability/)
 
