@@ -1,0 +1,96 @@
+# robot-shop-gitOps/argocd/apps/external-dns.yaml
+#
+# Deploys ExternalDNS via the official kubernetes-sigs Helm chart.
+# ExternalDNS watches Ingress/Service objects and creates matching
+# Route53 records — so the argocd-server Ingress hostname
+# (argocd.devopsportfolio.com) becomes a real DNS record pointing at
+# the ALB, automatically, with no manual route53 changes.
+#
+# IAM: authenticated via EKS Pod Identity, bound to
+# external-dns/external-dns by the aws_eks_pod_identity_association in
+# modules/external-dns. No role-arn annotation on the ServiceAccount.
+#
+# Early sync-wave so DNS management is available as other Ingresses
+# come online. Runs in its own namespace (external-dns) rather than
+# kube-system — matches the module defaults; keep the two in sync.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-dns
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  project: default
+
+  source:
+    repoURL: https://kubernetes-sigs.github.io/external-dns/
+    chart: external-dns
+    targetRevision: 1.21.1   # confirm current: helm search repo external-dns/external-dns --versions
+    helm:
+      values: |
+        provider:
+          name: aws
+
+        # Only manage records for this domain; ignore everything else
+        # in the account. Prevents ExternalDNS from touching unrelated
+        # zones even though the IAM read APIs can see them.
+        domainFilters:
+          - devopsportfolio.com
+
+        # Restrict to the PUBLIC zone. (If you later add a private zone
+        # you'd disambiguate with zoneIdFilters or aws.zoneType.)
+        policy: upsert-only   # never DELETE records — safest default for
+                              # a demo; flip to "sync" once you trust it
+                              # to also prune records for removed Ingresses.
+
+        # TXT registry ownership: ExternalDNS writes a companion TXT
+        # record per managed record so it knows which records IT owns
+        # and won't clobber ones created by hand or another cluster.
+        # txtOwnerId MUST be unique per cluster.
+        registry: txt
+        txtOwnerId: robot-shop
+        txtPrefix: "extdns-"
+
+        # Only act on Ingresses (and Services) that opt in, rather than
+        # every object in the cluster — safer default.
+        sources:
+          - ingress
+          - service
+
+        aws:
+          region: us-east-1
+          zoneType: public
+
+        serviceAccount:
+          create: true
+          name: external-dns
+          # no eks.amazonaws.com/role-arn annotation — Pod Identity
+          # resolves the role from the cluster-level association.
+
+        # ExternalDNS is a singleton controller; a single replica is
+        # correct (multiple replicas would race on Route53 writes).
+        replicaCount: 1
+
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+
+        # How often it reconciles cluster state -> Route53
+        interval: 1m
+        logLevel: info
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-dns
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
