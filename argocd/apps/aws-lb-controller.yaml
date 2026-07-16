@@ -31,9 +31,9 @@ spec:
     targetRevision: 3.4.1   # confirm current with: helm search repo eks/aws-load-balancer-controller --versions
     helm:
       values: |
-        clusterName: robot-shop     # must exactly match your EKS cluster_name / var.cluster_name
-        region: us-east-1           # set to your actual cluster region
-        vpcId: ""                   # optional — auto-discovered from the node's ENI metadata if left blank
+        clusterName: robot-shop    
+        region: us-east-1           
+        vpcId: vpc-0b0044b374130144f
 
         serviceAccount:
           create: true
