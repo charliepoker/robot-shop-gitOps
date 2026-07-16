@@ -1,0 +1,32 @@
+# robot-shop-gitOps/argocd/manifests/cert-manager/clusterissuer-staging.yaml
+#
+# Let's Encrypt STAGING issuer. Use this first to validate the whole
+# DNS-01 flow. It issues UNTRUSTED certs (browsers will warn) but has
+# very generous rate limits, so a misconfigured challenge loop won't
+# lock you out of production. Once a Certificate against this issuer
+# reaches Ready=True, switch real workloads to letsencrypt-prod.
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    # Staging ACME endpoint — untrusted CA, high rate limits.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: iheanachocharlie@gmail.com   # LE expiry/renewal notices go here
+    privateKeySecretRef:
+      # Where cert-manager stores the ACME ACCOUNT key (not the cert).
+      name: letsencrypt-staging-account-key
+    solvers:
+      - dns01:
+          route53:
+            # Region is auto-detected from AWS_REGION injected by Pod
+            # Identity, but pinning it is harmless and explicit.
+            region: us-east-1
+            # Pin the zone so cert-manager doesn't have to guess it.
+            hostedZoneID: Z101693915HJHMDLM1SNS
+            # No accessKeyID / role — ambient credentials from Pod Identity.
+        selector:
+          dnsZones:
+            - devopsportfolio.com
