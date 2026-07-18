@@ -1,0 +1,68 @@
+# NodePool = the Kubernetes "what nodes are allowed" (v1 API). Instance
+# constraints, Spot preference, a capacity ceiling, and the disruption/
+# consolidation policy. References the EC2NodeClass.
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+
+      # Fresh nodes are recycled after 30 days so the fleet keeps picking
+      # up new AMIs/patches — good hygiene, and a nice reliability point.
+      expireAfter: 720h  # 30 days
+
+      requirements:
+        # Prefer Spot; fall back to on-demand when Spot is unavailable.
+        # Karpenter picks the cheapest that satisfies pending pods.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+
+        # Keep to general-purpose families and modest sizes — portfolio
+        # cost control. Karpenter chooses the specific type per workload.
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["t", "m"]
+
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["2"]   # exclude old/expensive generations
+
+        # Cap instance size so a single big pod can't provision a huge box.
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["medium", "large", "xlarge"]
+
+  # Hard ceiling on total provisioned capacity — the guardrail that stops
+  # a runaway workload from launching unlimited nodes. Interview point.
+  limits:
+    cpu: "20"
+    memory: 40Gi
+
+  disruption:
+    # Consolidate when nodes are empty OR underutilized — bin-pack down
+    # to fewer nodes to save cost. This is what drives your scale-DOWN
+    # screenshot.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    # Wait this long after a node becomes consolidatable before acting,
+    # to avoid thrashing on brief dips.
+    consolidateAfter: 1m
+
+  # Higher weight = preferred NodePool when multiple match. Single pool
+  # here, so mostly documentation.
+  weight: 10

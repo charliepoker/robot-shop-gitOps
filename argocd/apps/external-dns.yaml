@@ -1,5 +1,3 @@
-# robot-shop-gitOps/argocd/apps/external-dns.yaml
-#
 # Deploys ExternalDNS via the official kubernetes-sigs Helm chart.
 # ExternalDNS watches Ingress/Service objects and creates matching
 # Route53 records — so the argocd-server Ingress hostname
@@ -9,10 +7,6 @@
 # IAM: authenticated via EKS Pod Identity, bound to
 # external-dns/external-dns by the aws_eks_pod_identity_association in
 # modules/external-dns. No role-arn annotation on the ServiceAccount.
-#
-# Early sync-wave so DNS management is available as other Ingresses
-# come online. Runs in its own namespace (external-dns) rather than
-# kube-system — matches the module defaults; keep the two in sync.
 
 apiVersion: argoproj.io/v1alpha1
 kind: Application

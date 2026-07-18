@@ -1,0 +1,35 @@
+
+#
+# Applies the NodePool + EC2NodeClass CRs. Separate from the karpenter
+# chart Application because these CRs need Karpenter's CRDs (and webhook)
+# to exist first — the later sync-wave enforces that ordering.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: karpenter-nodepool
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # after karpenter (wave -5)
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/charliepoker/robot-shop-gitOps.git
+    targetRevision: main
+    path: argocd/manifests/karpenter
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
