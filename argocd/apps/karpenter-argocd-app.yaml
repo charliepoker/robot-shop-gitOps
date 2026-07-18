@@ -1,0 +1,60 @@
+# Deploys the Karpenter controller via the official OCI Helm chart.
+
+# Auth: Pod Identity (association created in Phase 1 for the karpenter
+# ServiceAccount). No role-arn annotation needed.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: karpenter
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"   # controller + CRDs before the NodePool/EC2NodeClass
+spec:
+  project: default
+
+  source:
+    # Official Karpenter OCI Helm registry. If Argo CD rejects this,
+    # the repo needs to be registered as an OCI Helm repo (enableOCI),
+    # or add `oci: true` — most current Argo CD versions auto-detect OCI.
+    repoURL: public.ecr.aws/karpenter
+    chart: karpenter
+    targetRevision: "1.7.1"   # confirm latest v1.x: `helm show chart oci://public.ecr.aws/karpenter/karpenter`
+    helm:
+      values: |
+        settings:
+          clusterName: robot-shop
+          # SQS interruption queue from Phase 1 — defaults to cluster
+          # name in the module. Must match module.karpenter queue_name.
+          interruptionQueue: robot-shop
+
+        serviceAccount:
+          create: true
+          name: karpenter
+          # no eks.amazonaws.com/role-arn — Pod Identity supplies creds
+
+        # Portfolio: 1 replica. Prod runs 2 with leader election so a
+        # controller node going down doesn't pause provisioning.
+        replicas: 1
+
+        controller:
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    # kube-system to match the Phase 1 Pod Identity association namespace.
+    # If the association used a different namespace, change this to match.
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false          # kube-system always exists
+      - ServerSideApply=true           # Karpenter CRDs are large; SSA avoids annotation-size errors

@@ -1,0 +1,49 @@
+# EC2NodeClass = the AWS-specific "how to build a node" (v1 API,
+# karpenter.k8s.aws/v1). Subnets, security groups, AMI, and the node
+# IAM role. Subnet/SG discovery is by the karpenter.sh/discovery tag
+# my VPC module already applies 
+
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  role: robot-shop-karpenter-node
+
+  # AL2023, latest — matches the baseline managed node group. The v1 API
+  # uses amiSelectorTerms with an alias instead of the old amiFamily.
+  amiSelectorTerms:
+    - alias: al2023@latest
+
+  # Discover private subnets tagged by the VPC module.
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: robot-shop
+
+  # Discover the cluster/node security group(s) tagged the same way.
+  # If this selects nothing, the SG isn't tagged — verify with:
+  #   aws ec2 describe-security-groups \
+  #     --filters Name=tag:karpenter.sh/discovery,Values=robot-shop
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: robot-shop
+
+  # Encrypted gp3 root volume, consistent with the baseline node group.
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+
+  # Require IMDSv2 (token-based metadata) — security best practice, and
+  # a good interview detail: it mitigates SSRF-based credential theft.
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: required
+    httpPutResponseHopLimit: 2
+
+  tags:
+    Environment: prod
+    ManagedBy: karpenter
