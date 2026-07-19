@@ -1,0 +1,104 @@
+
+# Velero backup/restore server. The S3 bucket and IAM come from the
+# Terraform module (modules/velero-s3) — deliberately NOT created by the
+# cluster, because the backups must survive the cluster being destroyed.
+#
+# Auth: EKS Pod Identity bound to velero/velero. Note the two settings
+# below that are REQUIRED to make Pod Identity work here:
+#   - credentials.useSecret: false  -> don't look for a static AWS
+#     credentials Secret (the default assumes one exists)
+#   - configuration...credentialProfile unset + no secret mount -> the
+#     AWS plugin falls back to the SDK default chain, which picks up
+#     the Pod Identity credentials.
+#
+# IMPORTANT: the velero-plugin-for-aws version must be compatible with
+# the Velero server version this chart ships (chart 12.1.0). Verify with:
+#   helm show chart vmware-tanzu/velero --version 12.1.0   # see appVersion
+# then check the plugin compatibility matrix at
+# https://github.com/vmware-tanzu/velero-plugin-for-aws#compatibility
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  project: default
+
+  source:
+    repoURL: https://vmware-tanzu.github.io/helm-charts
+    chart: velero
+    targetRevision: "12.1.0"   # confirm: helm search repo vmware-tanzu/velero --versions
+    helm:
+      values: |
+        # The AWS object-store + volume-snapshotter plugin, injected as
+        # an init container. Velero core is cloud-agnostic; providers
+        # come from plugins.
+        initContainers:
+          - name: velero-plugin-for-aws
+            image: velero/velero-plugin-for-aws:v1.14.1
+            imagePullPolicy: IfNotPresent
+            volumeMounts:
+              - mountPath: /target
+                name: plugins
+
+        # Pod Identity supplies credentials — do NOT create/expect a
+        # static AWS credentials Secret.
+        credentials:
+          useSecret: false
+
+        configuration:
+          backupStorageLocation:
+            - name: default
+              provider: aws
+              # REPLACE with terraform output: module.velero_s3.bucket_name
+              bucket: REPLACE_WITH_VELERO_BUCKET_NAME
+              default: true
+              config:
+                region: us-east-1
+
+          volumeSnapshotLocation:
+            - name: default
+              provider: aws
+              config:
+                region: us-east-1
+
+        # Enable EBS volume snapshots so PersistentVolume DATA is captured,
+        # not just the K8s objects. This is what lets the Phase 8 restore
+        # drill actually recover Prometheus/stateful data.
+        # Cost note: snapshots are incremental and cheap at this scale, but
+        # set to false if you only care about K8s resource backup.
+        snapshotsEnabled: true
+
+        # Deploys the node-agent DaemonSet for file-system backup (Kopia).
+        # Left OFF: EBS snapshots cover the volumes here, and the DaemonSet
+        # is a pod on every node. Turn on if you need filesystem-level
+        # backup of volumes whose storage doesn't support snapshots.
+        deployNodeAgent: false
+
+        # No Schedule here — the recurring daily backup is created in
+        # Phase 8 (task 3). This task only needs Velero operational.
+
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 512Mi
+
+        metrics:
+          enabled: true   # Prometheus scrapes these in Phase 5
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
