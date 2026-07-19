@@ -1,0 +1,56 @@
+# Serves the metrics.k8s.io API by scraping CPU/memory from each node's
+# kubelet. This is what makes `kubectl top` work and what the Horizontal
+# Pod Autoscaler reads to make scaling decisions.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  project: default
+
+  source:
+    repoURL: https://kubernetes-sigs.github.io/metrics-server/
+    chart: metrics-server
+    targetRevision: "3.13.1"   # confirm: helm search repo metrics-server/metrics-server --versions
+    helm:
+      values: |
+        replicas: 1   # single replica is fine; HA setups run 2 with anti-affinity
+
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+
+        args:
+          # Prefer InternalIP for kubelet connections — the standard,
+          # reliable ordering on EKS.
+          - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+          # Faster metric freshness for HPA responsiveness during the
+          # Phase 7 traffic-spike test. Default is 60s.
+          - --metric-resolution=30s
+          #
+          # NOTE: if the pod stays NotReady with an x509 error like
+          # "unable to verify the first certificate" / "certificate signed
+          # by unknown authority", the kubelet serving certs aren't signed
+          # by the cluster CA. The standard fix is to add:
+          #   - --kubelet-insecure-tls
+          # Try WITHOUT it first — adding it unnecessarily weakens the
+          # kubelet connection, and knowing why it's sometimes needed is
+          # a good interview detail.
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # kube-system always exists
