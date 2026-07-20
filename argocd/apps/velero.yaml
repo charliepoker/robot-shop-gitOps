@@ -44,6 +44,11 @@ spec:
               - mountPath: /target
                 name: plugins
 
+        serviceAccount:
+          server:
+            create: true
+            name: velero
+
         # Pod Identity supplies credentials — do NOT create/expect a
         # static AWS credentials Secret.
         credentials:
