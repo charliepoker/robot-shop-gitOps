@@ -58,8 +58,7 @@ spec:
           backupStorageLocation:
             - name: default
               provider: aws
-              # REPLACE with terraform output: module.velero_s3.bucket_name
-              bucket: REPLACE_WITH_VELERO_BUCKET_NAME
+              bucket: robot-shop-velero-backups-448049792905
               default: true
               config:
                 region: us-east-1
