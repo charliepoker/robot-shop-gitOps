@@ -28,12 +28,12 @@ spec:
   source:
     repoURL: https://aws.github.io/eks-charts
     chart: aws-load-balancer-controller
-    targetRevision: 3.4.1   # confirm current with: helm search repo eks/aws-load-balancer-controller --versions
+    targetRevision: 3.4.1   
     helm:
       values: |
         clusterName: robot-shop    
         region: us-east-1           
-        vpcId: vpc-0b0044b374130144f
+        vpcId: vpc-03d8c7397e7ece0ea
 
         serviceAccount:
           create: true
@@ -60,4 +60,4 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=false   # kube-system always exists
+      - CreateNamespace=false   
