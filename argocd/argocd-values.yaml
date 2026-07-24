@@ -139,6 +139,13 @@ configs:
 
   params:
     server.insecure: "true" # TLS terminates at the ALB, see ingress block above
+    # Cluster-wide switch that makes the per-resource
+    # argocd.argoproj.io/compare-options: ServerSideDiff=true annotation
+    # actually take effect. Without this, the controller's reconciliation
+    # loop still uses client-side diffing regardless of that annotation,
+    # so resources whose mutating webhooks inject defaults (e.g. ESO's
+    # ExternalSecret) never settle into Synced.
+    controller.diff.server.side: "true"
 
   rbac:
     policy.default: role:readonly
