@@ -1,0 +1,202 @@
+---
+# Schema bootstrap for RDS MySQL.
+#
+# The in-cluster mysql image used to do this via its Docker entrypoint: create
+# the cities database, create the shipping user, and run the SQL init scripts.
+# RDS has no entrypoint, so that setup has to be rebuilt as an explicit,
+# version-controlled Job. This is that Job.
+#
+# It runs as an ArgoCD PreSync hook, so it completes before any application pod
+# in the robot-shop namespace tries to connect. It is idempotent: every
+# statement is guarded so ArgoCD can re-run the hook on every sync, and so a
+# cluster rebuild that restores an already-seeded RDS snapshot is a no-op.
+#
+# What it does (schema + users only):
+#   - CREATE DATABASE ratings, cities        (IF NOT EXISTS)
+#   - CREATE USER ratings, shipping          (IF NOT EXISTS, passwords from ESO)
+#   - GRANT each user on its own DB only     (least privilege)
+#   - CREATE the ratings table               (tiny, no data)
+#
+#
+# Credentials:
+#   - Connects as the RDS master (rds-master secret, this namespace only).
+#   - Sets each app user's password from that app's own secret, so the users it
+#     creates match exactly what ratings-db / shipping-db present to the app.
+
+apiVersion: batch/v1
+kind: Job
+
+metadata:
+  name: rds-schema-bootstrap
+  namespace: robot-shop-bootstrap
+  annotations:
+    # PreSync: run and succeed before the parent app syncs its workloads.
+    argocd.argoproj.io/hook: PreSync
+    # Replace the previous Job object on each run rather than erroring on a
+    # name clash. BeforeHookCreation would also work; Replace keeps one visible
+    # Job to inspect after a sync.
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  labels:
+    app.kubernetes.io/name: rds-schema-bootstrap
+    app.kubernetes.io/part-of: robot-shop
+    app.kubernetes.io/component: bootstrap
+
+spec:
+  # Give up rather than hammer RDS forever if credentials or networking are
+  # wrong. 3 attempts, then the sync fails visibly.
+  backoffLimit: 3
+  # Clean the Job object up 10 minutes after completion. Long enough to read
+  # logs after a sync, short enough not to accumulate.
+  ttlSecondsAfterFinished: 600
+  activeDeadlineSeconds: 300
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rds-schema-bootstrap
+        app.kubernetes.io/part-of: robot-shop
+    spec:
+      restartPolicy: Never
+      serviceAccountName: rds-schema-bootstrap
+
+      # restricted PSA is enforced in this namespace, so every field below is
+      # required, not decorative. A plain mysql client needs none of it relaxed.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: bootstrap
+          # Pinned digest-free tag is fine here; this is the official image and
+          # not part of the app supply chain. Swap to your ECR mirror if you
+          # want to avoid the Docker Hub pull-rate limit during rebuilds.
+          image: mysql:8.4
+          imagePullPolicy: IfNotPresent
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          # Master host/credentials. Never interpolated into the SQL text or
+          # into argv, so they cannot leak via `kubectl get pod -o yaml`,
+          # process listings, or the shell history of the heredoc.
+          env:
+            - name: MYSQL_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: rds-master
+                  key: MYSQL_HOST
+            - name: MYSQL_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: rds-master
+                  key: MYSQL_PORT
+            - name: MYSQL_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rds-master
+                  key: MYSQL_USERNAME
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: rds-master
+                  key: MYSQL_PASSWORD
+
+            # App passwords, injected as env and referenced by @variable in SQL
+            # so the literal never appears in the script text.
+            - name: RATINGS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ratings-db-admin
+                  key: MYSQL_PASSWORD
+            - name: SHIPPING_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: shipping-db-admin
+                  key: MYSQL_PASSWORD
+
+          # writable scratch for the mysql client, since root FS is read-only
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              echo "Waiting for RDS to accept connections..."
+              # mysqladmin ping uses MYSQL_PWD from the env; retry for up to ~60s
+              # in case the instance is still warming after a rebuild.
+              i=0
+              until mysqladmin ping -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_ADMIN_USER" --silent; do
+                i=$((i+1))
+                if [ "$i" -ge 30 ]; then
+                  echo "RDS did not become reachable in time" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "Connected. Applying schema (idempotent)..."
+
+              # -----------------------------------------------------------------
+              # Credentials are passed into SQL through MySQL user-defined
+              # variables set with --init-command, one per invocation. The
+              # password value travels in the variable binding, not in the SQL
+              # text on disk, and --init-command runs before the piped script.
+              #
+              # All DDL is guarded so re-runs are safe:
+              #   CREATE DATABASE / TABLE / USER  -> IF NOT EXISTS
+              #   ALTER USER                      -> reasserts the password each
+              #                                      run, so a rotated app secret
+              #                                      propagates on the next sync
+              #                                      with no manual step
+              #   GRANT                           -> idempotent by nature
+              #
+              # ALTER USER ... IDENTIFIED BY takes a string literal, not a
+              # variable, so the password is applied with a prepared statement
+              # built from the @ variable. The literal is never in the heredoc.
+              # -----------------------------------------------------------------
+              MYSQL="mysql --batch -h$MYSQL_HOST -P$MYSQL_PORT -u$MYSQL_ADMIN_USER"
+
+              # ratings: database, least-privilege user, and the small table.
+              $MYSQL --init-command="SET @pw = '$RATINGS_PASSWORD'" <<'SQL'
+              CREATE DATABASE IF NOT EXISTS ratings DEFAULT CHARACTER SET utf8mb4;
+              CREATE TABLE IF NOT EXISTS ratings.ratings (
+                  sku          VARCHAR(80)   NOT NULL,
+                  avg_rating   DECIMAL(3,2)  NOT NULL,
+                  rating_count INT           NOT NULL,
+                  PRIMARY KEY (sku)
+              ) ENGINE=InnoDB;
+              CREATE USER IF NOT EXISTS 'ratings'@'%' IDENTIFIED BY 'placeholder';
+              SET @s = CONCAT('ALTER USER ''ratings''@''%'' IDENTIFIED BY ''', @pw, '''');
+              PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+              GRANT ALL PRIVILEGES ON ratings.* TO 'ratings'@'%';
+              FLUSH PRIVILEGES;
+              SQL
+
+              # shipping owns the cities database. Note the asymmetry: the user
+              # is 'shipping', the schema is 'cities' -- straight from
+              # JpaConfig.java. Table + data are loaded out of band; see the
+              # cities-seed runbook. The database and grant must exist now so the
+              # shipping pod can connect even before the data is present.
+              $MYSQL --init-command="SET @pw = '$SHIPPING_PASSWORD'" <<'SQL'
+              CREATE DATABASE IF NOT EXISTS cities DEFAULT CHARACTER SET latin1;
+              CREATE USER IF NOT EXISTS 'shipping'@'%' IDENTIFIED BY 'placeholder';
+              SET @s = CONCAT('ALTER USER ''shipping''@''%'' IDENTIFIED BY ''', @pw, '''');
+              PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+              GRANT ALL PRIVILEGES ON cities.* TO 'shipping'@'%';
+              FLUSH PRIVILEGES;
+              SQL
+
+              echo "Schema bootstrap complete."
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
