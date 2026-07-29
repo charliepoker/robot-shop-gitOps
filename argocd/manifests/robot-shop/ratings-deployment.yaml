@@ -1,0 +1,61 @@
+---
+# ratings connects to RDS MySQL. Its DB env comes entirely from the ratings-db
+# secret that External Secrets Operator syncs from AWS Secrets Manager:
+#   PDO_URL, PDO_USER, PDO_PASSWORD
+#
+# IMPORTANT (pre-Phase-4 state): the upstream robotshop/rs-ratings image
+# HARDCODES the DB user/password in source (ratings/iloveit) and only reads
+# PDO_URL from env. Because the bootstrap Job set the MySQL 'ratings' user
+# password to the ESO-generated value (not 'iloveit'), this upstream image will
+# CrashLoop on DB auth. That is the EXPECTED, DOCUMENTED state until Phase 4
+# builds a patched image that reads PDO_USER/PDO_PASSWORD from env. The envFrom
+# wiring below is already correct for that patched image — nothing here changes
+# when the new image ships; the pod simply starts succeeding.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratings
+  namespace: robot-shop
+  labels:
+    service: ratings
+    app.kubernetes.io/name: ratings
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      service: ratings
+  template:
+    metadata:
+      labels:
+        service: ratings
+        app.kubernetes.io/name: ratings
+        app.kubernetes.io/part-of: robot-shop
+    spec:
+      containers:
+        - name: ratings
+          image: robotshop/rs-ratings:2.1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            # PDO_URL, PDO_USER, PDO_PASSWORD — synced by ESO from
+            # robot-shop/ratings-db in AWS Secrets Manager.
+            - secretRef:
+                name: ratings-db
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /_health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+      restartPolicy: Always

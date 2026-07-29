@@ -1,0 +1,58 @@
+---
+# In-cluster Redis (StatefulSet). Backs cart state and user sessions. Kept
+# in-cluster rather than ElastiCache — cart state is disposable cache, so a
+# managed service isn't justified for a demo. PVC gives it stable storage so a
+# pod restart doesn't drop every active cart.
+#
+# NOTE: verify storageClassName against your cluster:
+#   kubectl get storageclass
+# EKS default is often 'gp2'. If your EBS CSI driver provides 'gp3', keep it;
+# otherwise change to the class 'kubectl get sc' shows as (default).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: robot-shop
+  labels:
+    service: redis
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  replicas: 1
+  serviceName: redis
+  selector:
+    matchLabels:
+      service: redis
+  template:
+    metadata:
+      labels:
+        service: redis
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/part-of: robot-shop
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+      restartPolicy: Always
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 1Gi
