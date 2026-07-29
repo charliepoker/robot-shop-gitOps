@@ -1,0 +1,37 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: robot-shop
+  namespace: argocd
+  annotations:
+    # Syncs after robot-shop-secrets (wave 0) so the ratings-db / shipping-db
+    # K8s secrets exist before the app pods that envFrom them.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charliepoker/robot-shop-gitops.git
+    targetRevision: main
+    path: argocd/manifests/robot-shop
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: robot-shop
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Namespace already created by robot-shop-secrets with pod-security labels.
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

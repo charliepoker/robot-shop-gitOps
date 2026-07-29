@@ -1,0 +1,55 @@
+---
+# shipping connects to RDS MySQL (the 'cities' database). Its DB env comes from
+# the shipping-db secret ESO syncs from AWS Secrets Manager:
+#   DB_HOST, DB_USER, DB_PASSWORD  (DB_NAME carried for reference; app hardcodes /cities)
+#
+# Same pre-Phase-4 caveat as ratings: the upstream rs-shipping image hardcodes
+# shipping/secret and reads only DB_HOST from env, so it will CrashLoop on auth
+# against the ESO-set password until Phase 4 ships a patched image. The envFrom
+# wiring is already correct for that image. Java, so it needs more memory.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping
+  namespace: robot-shop
+  labels:
+    service: shipping
+    app.kubernetes.io/name: shipping
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      service: shipping
+  template:
+    metadata:
+      labels:
+        service: shipping
+        app.kubernetes.io/name: shipping
+        app.kubernetes.io/part-of: robot-shop
+    spec:
+      containers:
+        - name: shipping
+          image: robotshop/rs-shipping:2.1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: shipping-db
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 500Mi
+            limits:
+              cpu: 200m
+              memory: 1000Mi
+      restartPolicy: Always
