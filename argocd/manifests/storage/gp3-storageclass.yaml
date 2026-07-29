@@ -1,0 +1,27 @@
+---
+# gp3 StorageClass backed by the EBS CSI driver (ebs.csi.aws.com), which is
+# already installed and wired with Pod Identity . The in-tree gp2
+# class that ships with the cluster uses the deprecated kubernetes.io/aws-ebs
+# provisioner; this replaces it with the supported CSI path and modern gp3
+# volumes (cheaper baseline, configurable IOPS/throughput).
+#
+# Volumes are encrypted with the EBS customer-managed key via its alias, so the
+# reference survives cluster rebuilds (the key id changes; the alias does not).
+#
+# Marked default so PVCs that omit storageClassName land here. If you prefer to
+# keep gp2 as default, drop the annotation and keep storageClassName: gp3
+# explicit on the redis StatefulSet.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+parameters:
+  type: gp3
+  encrypted: "true"
+  kmsKeyId: alias/robot-shop-ebs

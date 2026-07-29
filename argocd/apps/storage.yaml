@@ -1,0 +1,37 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: storage
+  namespace: argocd
+  annotations:
+    # Sync early — before any app that provisions a PVC. Negative wave puts it
+    # ahead of robot-shop (wave 1) and its datastores.
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: platform
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charliepoker/robot-shop-gitops.git
+    targetRevision: main
+    path: argocd/manifests/storage
+  destination:
+    server: https://kubernetes.default.svc
+    # StorageClass is cluster-scoped; namespace is ignored for it but ArgoCD
+    # still requires the field. argocd is a safe placeholder.
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
