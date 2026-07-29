@@ -1,0 +1,22 @@
+---
+# Dedicated ServiceAccount for the bootstrap Job. It exists so the Job's
+# identity is distinct and auditable, and so no default SA in the namespace
+# gains any permissions.
+#
+# The Job itself needs NO Kubernetes API access -- it only reads its own
+# mounted secrets (which the kubelet provides) and talks to RDS over the
+# network. So there is no Role or RoleBinding here on purpose: least privilege
+# means the SA has exactly the API rights of an unbound account, i.e. none.
+#
+# automountServiceAccountToken is disabled because the Job never calls the
+# Kubernetes API. This removes the projected token from the pod entirely.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rds-schema-bootstrap
+  namespace: robot-shop-bootstrap
+  labels:
+    app.kubernetes.io/name: rds-schema-bootstrap
+    app.kubernetes.io/part-of: robot-shop
+    app.kubernetes.io/component: bootstrap
+automountServiceAccountToken: false
