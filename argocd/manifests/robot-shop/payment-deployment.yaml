@@ -1,0 +1,40 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment
+  namespace: robot-shop
+  labels:
+    service: payment
+    app.kubernetes.io/name: payment
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      service: payment
+  template:
+    metadata:
+      labels:
+        service: payment
+        app.kubernetes.io/name: payment
+        app.kubernetes.io/part-of: robot-shop
+    spec:
+      containers:
+        - name: payment
+          image: robotshop/rs-payment:2.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            # External payment gateway the service calls out to. Upstream default.
+            - name: PAYMENT_GATEWAY
+              value: "https://www.paypal.com"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+      restartPolicy: Always

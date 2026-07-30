@@ -1,0 +1,35 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dispatch
+  namespace: robot-shop
+  labels:
+    service: dispatch
+    app.kubernetes.io/name: dispatch
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      service: dispatch
+  template:
+    metadata:
+      labels:
+        service: dispatch
+        app.kubernetes.io/name: dispatch
+        app.kubernetes.io/part-of: robot-shop
+    spec:
+      containers:
+        - name: dispatch
+          image: robotshop/rs-dispatch:2.1.0
+          imagePullPolicy: IfNotPresent
+          # No ports: dispatch only consumes from RabbitMQ, exposes nothing.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+      restartPolicy: Always
