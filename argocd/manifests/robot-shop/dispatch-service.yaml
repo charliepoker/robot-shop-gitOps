@@ -1,0 +1,19 @@
+---
+# dispatch exposes nothing; headless service exists only for DNS/discovery parity.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dispatch
+  namespace: robot-shop
+  labels:
+    service: dispatch
+    app.kubernetes.io/name: dispatch
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  clusterIP: None
+  selector:
+    service: dispatch
+  ports:
+    - name: headless
+      port: 55555
+      targetPort: 55555
