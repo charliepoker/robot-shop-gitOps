@@ -24,4 +24,4 @@ reclaimPolicy: Delete
 parameters:
   type: gp3
   encrypted: "true"
-  kmsKeyId: alias/robot-shop-ebs
+
