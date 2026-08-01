@@ -1,0 +1,50 @@
+---
+# Ingress for the Robot Shop web frontend: shop.devopsportfolio.com over HTTPS.
+#
+# Provisioned by the AWS Load Balancer Controller (ingressClassName: alb). TLS
+# terminates at the ALB using the wildcard *.devopsportfolio.com ACM cert.
+# ExternalDNS creates the shop.devopsportfolio.com A/ALIAS record automatically
+# from the hostname annotation.
+#
+# COST NOTE: alb.ingress.kubernetes.io/group.name makes this share ONE ALB with
+# any other ingress in the same group. argocd currently runs its own ALB (no
+# group). To consolidate onto a single ALB and save ~$16-20/mo, add the SAME
+# group.name annotation to the argocd ingress too. Until then, this creates its
+# own ALB — still correct, just not yet shared. The group is set here so the
+# consolidation is a one-line change on the argocd side whenever you choose.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: robot-shop
+  namespace: robot-shop
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:448049792905:certificate/292d8b16-6fbe-4536-983e-65997ed39049"
+    # Health check against the web service. nginx serves / so the default is fine,
+    # but pin it explicitly so the target group is healthy deterministically.
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-port: "8080"
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Shared ALB group — see COST NOTE above.
+    alb.ingress.kubernetes.io/group.name: devopsportfolio-shared
+    external-dns.alpha.kubernetes.io/hostname: shop.devopsportfolio.com
+  labels:
+    app.kubernetes.io/name: web
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  ingressClassName: alb
+  rules:
+    - host: shop.devopsportfolio.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 8080
