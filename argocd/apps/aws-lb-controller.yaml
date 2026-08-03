@@ -33,7 +33,7 @@ spec:
       values: |
         clusterName: robot-shop    
         region: us-east-1           
-        vpcId: vpc-0ec6ce26bcb9c4cb3
+        vpcId: vpc-0b32603ab3be01fc9
 
         serviceAccount:
           create: true
