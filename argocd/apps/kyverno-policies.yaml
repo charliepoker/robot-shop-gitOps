@@ -1,0 +1,36 @@
+# Syncs the hand-written ClusterPolicies under manifests/kyverno/.
+# Separate app (like karpenter-nodepool follows karpenter) so the CRDs from the
+# controller app exist before the policies that use them.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno-policies
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"   # after kyverno controller (-6), before robot-shop (1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: platform
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charliepoker/robot-shop-gitops.git
+    targetRevision: main
+    path: argocd/manifests/kyverno
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

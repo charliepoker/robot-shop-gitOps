@@ -1,0 +1,80 @@
+# Supply-chain admission gate for robot-shop.
+#
+# ── SEQUENCING (read before enforcing) ────────────────────────────────────────
+# 1. Ships in AUDIT: reports violations to PolicyReports, blocks NOTHING. Your
+#    current Docker Hub pods keep running.
+# 2. imageReferences is scoped to YOUR ECR registry only, so Docker Hub images
+#    aren't evaluated at all — zero noise until services migrate to ECR.
+# 3. Flip to ENFORCE (validationFailureAction: Enforce) only AFTER:
+#      a. cd.yml is signing + attesting ECR images (Tasks 5–6), and
+#      b. robot-shop deployments point at those signed ECR digests, and
+#      c. the Kyverno SA has ECR read (Pod Identity) so it can fetch signatures.
+#    Enforcing before (a)+(c) blocks every ECR pull. You've been warned twice.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: robot-shop-verify-images
+  annotations:
+    policies.kyverno.io/title: Verify Robot Shop image signatures + SBOM
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Requires every ECR image in the robot-shop namespace to carry a Cosign
+      keyless signature from the robot-shop CD workflow identity, plus a
+      CycloneDX SBOM attestation. Deploy-by-digest is enforced.
+spec:
+  # AUDIT for now. Newer CEL-based ImageValidatingPolicy uses `failureAction`;
+  # for classic ClusterPolicy this spec-level field is correct.
+  validationFailureAction: Audit
+  webhookTimeoutSeconds: 30    # signature fetch + Rekor lookup is slower than a plain policy
+  background: false            # required: verifyImages does not run in background scans
+  failurePolicy: Ignore        # Audit phase: never fail-closed on a Kyverno hiccup. Set Fail when enforcing.
+  rules:
+    # Rule 1 — keyless signature. (A verifyImages rule does signatures OR
+    # attestations, not both, so the SBOM check is a separate rule below.)
+    - name: verify-cosign-keyless-signature
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["robot-shop"]
+      verifyImages:
+        - imageReferences:
+            - "448049792905.dkr.ecr.us-east-1.amazonaws.com/*"
+          mutateDigest: true    # pin tag→digest at admission
+          verifyDigest: true    # require the deployed ref to be a digest
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    # Must match the SAN on the Fulcio cert your CD workflow gets.
+                    # Adjust if the signing workflow file isn't cd.yml or the
+                    # branch isn't master.
+                    subjectRegExp: "^https://github\\.com/charliepoker/robot-shop/\\.github/workflows/cd\\.yml@refs/heads/master$"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+
+    # Rule 2 — CycloneDX SBOM attestation bound to the same identity.
+    - name: verify-sbom-attestation
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["robot-shop"]
+      verifyImages:
+        - imageReferences:
+            - "448049792905.dkr.ecr.us-east-1.amazonaws.com/*"
+          required: true
+          attestations:
+            - type: https://cyclonedx.org/bom   # predicateType from `cosign attest --type cyclonedx`
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subjectRegExp: "^https://github\\.com/charliepoker/robot-shop/\\.github/workflows/cd\\.yml@refs/heads/master$"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: https://rekor.sigstore.dev
