@@ -1,0 +1,87 @@
+# Kyverno policy engine — admission-time supply-chain enforcement.
+# The pipeline: verifyImages (Cosign keyless signature + SBOM attestation)
+# so only images built, scanned, and signed by the robot-shop CD workflow
+# can run in the robot-shop namespace.
+#
+# Auth note: to VERIFY signatures on PRIVATE ECR images, Kyverno must be able
+# to READ from ECR (it pulls the .sig / attestation artifacts). This does NOT
+# matter yet — the policy starts in Audit and robot-shop still runs Docker Hub
+# images. Before flipping to Enforce on ECR images, grant the Kyverno SA ECR
+# read via a Pod Identity association (mirror the pattern from other Phase-1
+# components) OR configure imagePullSecrets. Flagged again in the policy file.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno
+  namespace: argocd
+  annotations:
+    # Earlier than robot-shop (wave 1) and argo-rollouts (-5) so the admission
+    # webhook + CRDs exist before any workload it will eventually gate.
+    argocd.argoproj.io/sync-wave: "-6"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: platform
+spec:
+  project: default
+
+  source:
+    repoURL: https://kyverno.github.io/kyverno/
+    chart: kyverno
+    targetRevision: "3.8.1"   # app v1.18.1. Confirm latest 3.x: helm show chart kyverno/kyverno --repo https://kyverno.github.io/kyverno/ | grep version
+    helm:
+      # Portfolio sizing. Verify keys against: helm show values kyverno/kyverno --version 3.8.1
+      values: |
+        admissionController:
+          replicas: 1          # prod: 3 for HA. verifyImages runs here.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 384Mi
+        backgroundController:
+          replicas: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+        # Reports drive the Audit-phase visibility (PolicyReports show what WOULD
+        # be blocked). Keep it; it's cheap.
+        reportsController:
+          replicas: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+        cleanupController:
+          replicas: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Kyverno REQUIRES a dedicated namespace — never kube-system.
+    namespace: kyverno
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # Kyverno CRDs are large — avoids annotation-size errors
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
