@@ -1,0 +1,21 @@
+---
+# Canary Service for the web Rollout. Argo Rollouts injects the
+# rollouts-pod-template-hash into this selector at runtime to point it at the
+# canary ReplicaSet — do NOT add the hash yourself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-canary
+  namespace: robot-shop
+  labels:
+    service: web
+    app.kubernetes.io/name: web
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    service: web
