@@ -1,6 +1,20 @@
 ---
-apiVersion: apps/v1
-kind: Deployment
+# web frontend as an Argo Rollout with an ALB-weighted canary.
+#
+# Traffic split is done at the ALB (weighted target groups via the AWS LB
+# Controller), so the percentages are REAL traffic percentages, not a
+# replica-count approximation. Argo Rollouts mutates the Ingress action
+# annotation + the canary/stable Service selectors to drive it.
+#
+# Phase 4 = TIME-based pauses (automated pause-and-promote). Phase 5 swaps the
+# pauses for an AnalysisTemplate querying Prometheus (error rate / p95) so a bad
+# canary auto-aborts instead of auto-promoting.
+#
+# IMAGE: still Docker Hub here so this is deployable and testable NOW, before
+# cd.yml exists. Task 6's CD pipeline rewrites this to the signed ECR digest:
+#   image: 448049792905.dkr.ecr.us-east-1.amazonaws.com/<web-repo>@sha256:...
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
   name: web
   namespace: robot-shop
@@ -9,7 +23,8 @@ metadata:
     app.kubernetes.io/name: web
     app.kubernetes.io/part-of: robot-shop
 spec:
-  replicas: 1
+  replicas: 2
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       service: web
@@ -26,6 +41,14 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          # A real readiness gate so canary weight steps wait for healthy pods.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
           resources:
             requests:
               cpu: 100m
@@ -33,4 +56,22 @@ spec:
             limits:
               cpu: 200m
               memory: 100Mi
-      restartPolicy: Always
+  strategy:
+    canary:
+      # Reuse the existing `web` Service as stable; add one canary Service.
+      stableService: web
+      canaryService: web-canary
+      trafficRouting:
+        alb:
+          ingress: robot-shop      # the Ingress object name in ingress.yaml
+          servicePort: 8080
+          # rootService omitted → defaults to stableService (web), which is what
+          # the Ingress backend references.
+      steps:
+        - setWeight: 20
+        - pause: { duration: 2m }   # auto-promotes after 2m 
+        - setWeight: 50
+        - pause: { duration: 2m }
+        - setWeight: 80
+        - pause: { duration: 1m }
+        # implicit final step promotes to 100%

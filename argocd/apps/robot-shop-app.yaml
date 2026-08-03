@@ -5,8 +5,6 @@ metadata:
   name: robot-shop
   namespace: argocd
   annotations:
-    # Syncs after robot-shop-secrets (wave 0) so the ratings-db / shipping-db
-    # K8s secrets exist before the app pods that envFrom them.
     argocd.argoproj.io/sync-wave: "1"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
@@ -21,12 +19,31 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: robot-shop
+  # ── Critical for the canary ──────────────────────────────────────────────
+  # Argo Rollouts mutates live objects that ArgoCD also manages. Without these,
+  # selfHeal reverts the controller's edits mid-rollout and traffic routing
+  # breaks. Scoped by name so nothing else in the app is affected.
+  ignoreDifferences:
+    - group: ""
+      kind: Service
+      name: web
+      jsonPointers:
+        - /spec/selector          # Rollouts injects rollouts-pod-template-hash
+    - group: ""
+      kind: Service
+      name: web-canary
+      jsonPointers:
+        - /spec/selector
+    - group: networking.k8s.io
+      kind: Ingress
+      name: robot-shop
+      jqPathExpressions:
+        - '.metadata.annotations."alb.ingress.kubernetes.io/actions.web"'  # weight rewrites
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
-      # Namespace already created by robot-shop-secrets with pod-security labels.
       - CreateNamespace=false
       - ServerSideApply=true
     retry:
