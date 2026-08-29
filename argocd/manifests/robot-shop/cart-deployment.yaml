@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: cart
-          image: robotshop/rs-cart:2.1.0
+          image: 448049792905.dkr.ecr.us-east-1.amazonaws.com/cart:4ea3c0048dd9bfb83c167815255786ba46c09d04
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
