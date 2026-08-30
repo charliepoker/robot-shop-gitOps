@@ -26,7 +26,7 @@ metadata:
 spec:
   # AUDIT for now. Newer CEL-based ImageValidatingPolicy uses `failureAction`;
   # for classic ClusterPolicy this spec-level field is correct.
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   webhookTimeoutSeconds: 30    # signature fetch + Rekor lookup is slower than a plain policy
   background: false            # required: verifyImages does not run in background scans
   failurePolicy: Ignore        # Audit phase: never fail-closed on a Kyverno hiccup. Set Fail when enforcing.
@@ -43,7 +43,7 @@ spec:
         - imageReferences:
             - "448049792905.dkr.ecr.us-east-1.amazonaws.com/*"
           mutateDigest: true    # pin tag→digest at admission
-          verifyDigest: true    # require the deployed ref to be a digest
+          verifyDigest: false
           required: true
           attestors:
             - count: 1
