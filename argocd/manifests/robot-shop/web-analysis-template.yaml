@@ -1,0 +1,40 @@
+---
+# Job-provider smoke test for the web canary. No Prometheus — Phase 5 swaps this
+# for a Prometheus AnalysisTemplate (error-rate / p95). The Job curls the canary
+# Service in-cluster; <90% HTTP-200 fails the AnalysisRun, which aborts the rollout.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: web-canary-smoke
+  namespace: robot-shop
+  labels:
+    app.kubernetes.io/part-of: robot-shop
+spec:
+  metrics:
+    - name: canary-http-success
+      count: 1
+      failureLimit: 0          # any failure => analysis fails => rollout aborts
+      provider:
+        job:
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 120
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: smoke
+                    image: curlimages/curl:8.11.1   # Docker Hub — not ECR, so Kyverno doesn't gate it
+                    command: ["/bin/sh", "-euc"]
+                    args:
+                      - |
+                        ok=0; total=10
+                        for i in $(seq "$total"); do
+                          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+                            http://web-canary.robot-shop.svc.cluster.local:8080/ || echo 000)
+                          echo "attempt $i -> HTTP $code"
+                          [ "$code" = "200" ] && ok=$((ok+1))
+                          sleep 2
+                        done
+                        echo "canary HTTP success: ${ok}/${total}"
+                        [ "$ok" -ge 9 ]

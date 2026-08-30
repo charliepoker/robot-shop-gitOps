@@ -69,9 +69,11 @@ spec:
           # the Ingress backend references.
       steps:
         - setWeight: 20
-        - pause: {duration: 2m} # auto-promotes after 2m 
+        - analysis:
+            templates:
+              - templateName: web-canary-smoke
         - setWeight: 50
-        - pause: {duration: 2m}
-        - setWeight: 80
-        - pause: {duration: 1m}
-          # implicit final step promotes to 100%
+        - analysis:
+            templates:
+              - templateName: web-canary-smoke
+        - setWeight: 100
