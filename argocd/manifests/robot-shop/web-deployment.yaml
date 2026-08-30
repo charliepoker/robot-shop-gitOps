@@ -37,7 +37,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: robotshop/rs-web:2.1.0
+          image: 448049792905.dkr.ecr.us-east-1.amazonaws.com/web:4ea3c0048dd9bfb83c167815255786ba46c09d04
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -63,15 +63,15 @@ spec:
       canaryService: web-canary
       trafficRouting:
         alb:
-          ingress: robot-shop      # the Ingress object name in ingress.yaml
+          ingress: robot-shop # the Ingress object name in ingress.yaml
           servicePort: 8080
           # rootService omitted → defaults to stableService (web), which is what
           # the Ingress backend references.
       steps:
         - setWeight: 20
-        - pause: { duration: 2m }   # auto-promotes after 2m 
+        - pause: {duration: 2m} # auto-promotes after 2m 
         - setWeight: 50
-        - pause: { duration: 2m }
+        - pause: {duration: 2m}
         - setWeight: 80
-        - pause: { duration: 1m }
-        # implicit final step promotes to 100%
+        - pause: {duration: 1m}
+          # implicit final step promotes to 100%
