@@ -67,6 +67,8 @@ spec:
       verifyImages:
         - imageReferences:
             - "448049792905.dkr.ecr.us-east-1.amazonaws.com/*"
+          mutateDigest: true
+          verifyDigest: false 
           required: true
           attestations:
             - type: https://cyclonedx.org/bom   # predicateType from `cosign attest --type cyclonedx`
