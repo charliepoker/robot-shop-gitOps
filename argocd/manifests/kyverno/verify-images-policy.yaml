@@ -1,11 +1,18 @@
 # Supply-chain admission gate for robot-shop.
 #
+# Split into two ClusterPolicies because Kyverno's validationFailureAction
+# is only configurable at the whole-policy level (per-rule override on a
+# verifyImages rule is silently dropped in this Kyverno version — confirmed
+# via status.autogen.rules showing it un-set after being applied). Signature
+# verification and SBOM-attestation verification need different enforcement,
+# so they can no longer live as two rules in one policy.
+#
 # ── SEQUENCING (read before enforcing) ────────────────────────────────────────
 # 1. Ships in AUDIT: reports violations to PolicyReports, blocks NOTHING. Your
 #    current Docker Hub pods keep running.
 # 2. imageReferences is scoped to YOUR ECR registry only, so Docker Hub images
 #    aren't evaluated at all — zero noise until services migrate to ECR.
-# 3. Flip to ENFORCE (validationFailureAction: Enforce) only AFTER:
+# 3. Flip a policy to ENFORCE only AFTER:
 #      a. cd.yml is signing + attesting ECR images (Tasks 5–6), and
 #      b. robot-shop deployments point at those signed ECR digests, and
 #      c. the Kyverno SA has ECR read (Pod Identity) so it can fetch signatures.
@@ -14,25 +21,21 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: robot-shop-verify-images
+  name: robot-shop-verify-image-signature
   annotations:
-    policies.kyverno.io/title: Verify Robot Shop image signatures + SBOM
+    policies.kyverno.io/title: Verify Robot Shop image signatures
     policies.kyverno.io/category: Supply Chain Security
     policies.kyverno.io/severity: high
     policies.kyverno.io/description: >-
       Requires every ECR image in the robot-shop namespace to carry a Cosign
-      keyless signature from the robot-shop CD workflow identity, plus a
-      CycloneDX SBOM attestation. Deploy-by-digest is enforced.
+      keyless signature from the robot-shop CD workflow identity.
+      Deploy-by-digest is enforced.
 spec:
-  # AUDIT for now. Newer CEL-based ImageValidatingPolicy uses `failureAction`;
-  # for classic ClusterPolicy this spec-level field is correct.
   validationFailureAction: Enforce
   webhookTimeoutSeconds: 30    # signature fetch + Rekor lookup is slower than a plain policy
   background: false            # required: verifyImages does not run in background scans
-  failurePolicy: Ignore        # Audit phase: never fail-closed on a Kyverno hiccup. Set Fail when enforcing.
+  failurePolicy: Ignore        # never fail-closed on a Kyverno hiccup
   rules:
-    # Rule 1 — keyless signature. (A verifyImages rule does signatures OR
-    # attestations, not both, so the SBOM check is a separate rule below.)
     - name: verify-cosign-keyless-signature
       match:
         any:
@@ -56,17 +59,34 @@ spec:
                     issuer: "https://token.actions.githubusercontent.com"
                     rekor:
                       url: https://rekor.sigstore.dev
-
-    # Rule 2 — CycloneDX SBOM attestation bound to the same identity.
-    #
-    # Audit, not Enforce: real-world SBOMs (ratings' full CycloneDX dependency
-    # tree) can exceed Kyverno's ~2MiB admission processing limit ("context
-    # size limit exceeded"). That's a Kyverno capacity limit, not a signal the
-    # image is untrusted — enforcing it here would block deploys outright.
-    # Violations still land in PolicyReports for visibility. Rule 1 (cosign
-    # signature) stays in Enforce.
+---
+# Audit, not Enforce: real-world SBOMs (ratings ~2.9MB, shipping ~2.5MB, full
+# CycloneDX dependency trees) exceed Kyverno's ~2MiB admission processing
+# limit ("context size limit exceeded"). That's a Kyverno capacity limit, not
+# a signal the image is untrusted — enforcing it would block every deploy
+# whose SBOM happens to be large. Violations still land in PolicyReports for
+# visibility. Image signature verification (separate policy above) stays in
+# Enforce.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: robot-shop-verify-sbom-attestation
+  annotations:
+    policies.kyverno.io/title: Verify Robot Shop SBOM attestations
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Requires every ECR image in the robot-shop namespace to carry a
+      CycloneDX SBOM attestation from the robot-shop CD workflow identity.
+      Audit mode: large SBOMs can exceed Kyverno's admission size limit, so
+      violations are reported, not blocked.
+spec:
+  validationFailureAction: Audit
+  webhookTimeoutSeconds: 30
+  background: false
+  failurePolicy: Ignore
+  rules:
     - name: verify-sbom-attestation
-      validationFailureAction: Audit
       match:
         any:
           - resources:
@@ -76,7 +96,7 @@ spec:
         - imageReferences:
             - "448049792905.dkr.ecr.us-east-1.amazonaws.com/*"
           mutateDigest: true
-          verifyDigest: false 
+          verifyDigest: false
           required: true
           attestations:
             - type: https://cyclonedx.org/bom   # predicateType from `cosign attest --type cyclonedx`
