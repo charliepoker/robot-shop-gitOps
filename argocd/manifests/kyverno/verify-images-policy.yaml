@@ -58,7 +58,15 @@ spec:
                       url: https://rekor.sigstore.dev
 
     # Rule 2 — CycloneDX SBOM attestation bound to the same identity.
+    #
+    # Audit, not Enforce: real-world SBOMs (ratings' full CycloneDX dependency
+    # tree) can exceed Kyverno's ~2MiB admission processing limit ("context
+    # size limit exceeded"). That's a Kyverno capacity limit, not a signal the
+    # image is untrusted — enforcing it here would block deploys outright.
+    # Violations still land in PolicyReports for visibility. Rule 1 (cosign
+    # signature) stays in Enforce.
     - name: verify-sbom-attestation
+      validationFailureAction: Audit
       match:
         any:
           - resources:
