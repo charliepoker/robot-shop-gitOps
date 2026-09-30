@@ -1,0 +1,55 @@
+# Observability configuration that lives as plain manifests (not Helm values):
+#   dashboards/     Grafana dashboards as ConfigMaps 
+#   podmonitors/    extra scrape targets, e.g. Argo CD itself  adds ServiceMonitors and PrometheusRules here.
+#
+# Kept separate from kube-prometheus-stack on purpose: the chart is a pinned,
+# versioned dependency; this is OUR content and changes on its own schedule.
+# A dashboard tweak should never re-render the whole monitoring stack.
+#
+# Recurse so new subfolders are picked up without touching this file.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-config
+  namespace: argocd
+  annotations:
+    # After kube-prometheus-stack (-3), which installs the PodMonitor CRD.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/charliepoker/robot-shop-gitops.git
+    targetRevision: main
+    path: argocd/manifests/monitoring
+    directory:
+      recurse: true
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The monitoring namespace (and its pod-security labels) belongs to the
+      # kube-prometheus-stack Application.
+      - CreateNamespace=false
+      # REQUIRED: node-exporter-full is ~460KB. Client-side apply stores the whole
+      # object in a 256KB annotation and fails; server-side apply does not.
+      - ServerSideApply=true
+      # During a cluster rebuild the PodMonitor CRD may not exist yet when this app
+      # first syncs. Apply anyway and let the retry below succeed once it does.
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -259,6 +259,13 @@ spec:
               memory: 512Mi
 
           sidecar:
+            dashboards:
+              # Our dashboards live in ConfigMaps (see monitoring-config). This
+              # annotation names the Grafana folder each one lands in, keeping
+              # them apart from the ~30 dashboards the chart ships.
+              folderAnnotation: grafana_folder
+              provider:
+                foldersFromFilesStructure: true
             resources:
               requests:
                 cpu: 10m
