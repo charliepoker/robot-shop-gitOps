@@ -1,0 +1,51 @@
+# Scrapes Argo CD's own metrics so the ArgoCD dashboard has data.
+#
+# Why a PodMonitor and not the chart's ServiceMonitors:
+#   Argo CD is bootstrapped with `helm install` (argocd/argocd-values.yaml), not
+#   managed by GitOps. Enabling metrics there means a manual `helm upgrade` of the
+#   thing that runs everything else. Every Argo CD pod already exposes a container
+#   port named "metrics", so a PodMonitor needs no Services and no change to
+#   Argo CD at all.
+#
+# Why the relabeling:
+#   The official dashboard filters queries by job name, e.g.
+#   job="argocd-server-metrics". Those are the names the chart's metrics Services
+#   would have produced. Here the job label is rebuilt from the pod's
+#   app.kubernetes.io/name label (argocd-server -> argocd-server-metrics), so the
+#   dashboard works unmodified.
+#
+#   argocd-application-controller -> argocd-application-controller-metrics
+#   argocd-server                 -> argocd-server-metrics
+#   argocd-repo-server            -> argocd-repo-server-metrics
+#
+# (The suffix uses a hyphen on purpose: Prometheus would read "$1_metrics" as a
+# variable named 1_metrics and produce an empty job label.)
+#
+# The ApplicationSet controller is disabled in this install, so the dashboard's
+# ApplicationSet panels stay empty. Redis exposes no "metrics" port, so it is
+# skipped automatically.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: argocd
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: argocd-podmonitor
+    app.kubernetes.io/part-of: observability
+spec:
+  namespaceSelector:
+    matchNames:
+      - argocd
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: argocd
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_label_app_kubernetes_io_name
+          targetLabel: job
+          replacement: "$1-metrics"
