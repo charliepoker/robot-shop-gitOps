@@ -27,6 +27,7 @@ spec:
   securityGroupSelectorTerms:
     - tags:
         karpenter.sh/discovery: robot-shop
+        Name: robot-shop-node 
 
   # Encrypted gp3 root volume, consistent with the baseline node group.
   blockDeviceMappings:
