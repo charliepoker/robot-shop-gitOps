@@ -237,6 +237,7 @@ spec:
               memory: 128Mi
 
         prometheus-node-exporter:
+          priorityClassName: system-node-critical
           resources:
             requests:
               cpu: 10m
