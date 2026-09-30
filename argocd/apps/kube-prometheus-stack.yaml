@@ -102,7 +102,50 @@ spec:
 
         # ── Prometheus ────────────────────────────────────────────────────
         prometheus:
+          # https://prometheus.devopsportfolio.com — Prometheus has NO built-in
+          # authentication, so the ALB enforces a Cognito login (with MFA) before
+          # any request reaches the pod. Auth is applied per Ingress rule, so it
+          # protects this host only and leaves Grafana and the shop untouched.
+          #
+          # Joins the existing ALB group, so this costs $0 (no new load balancer).
+          # Every group-wide annotation below MUST match the shop Ingress exactly,
+          # or the controller rejects the whole group, shop included.
+          ingress:
+            enabled: true
+            ingressClassName: alb
+            pathType: Prefix
+            hosts:
+              - prometheus.devopsportfolio.com
+            annotations:
+              # ── shared ALB (group-wide, must match the shop Ingress) ──
+              alb.ingress.kubernetes.io/group.name: devopsportfolio-shared
+              alb.ingress.kubernetes.io/scheme: internet-facing
+              alb.ingress.kubernetes.io/target-type: ip
+              alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
+              alb.ingress.kubernetes.io/ssl-redirect: "443"
+              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:448049792905:certificate/292d8b16-6fbe-4536-983e-65997ed39049"
+              # Hardening: drop malformed headers at the edge (request-smuggling
+              # defence). Merged into the shared ALB's attributes.
+              alb.ingress.kubernetes.io/load-balancer-attributes: routing.http.drop_invalid_header_fields.enabled=true
+              # ── this target group ──
+              # Prometheus answers / with a redirect; /-/healthy returns 200.
+              alb.ingress.kubernetes.io/healthcheck-path: /-/healthy
+              alb.ingress.kubernetes.io/success-codes: "200"
+              external-dns.alpha.kubernetes.io/hostname: prometheus.devopsportfolio.com
+              # ── ALB authentication (Cognito) ──
+              # Values come from `terraform output` in robot-shop-infra. None are
+              # secrets: the ALB fetches the client secret from Cognito itself.
+              alb.ingress.kubernetes.io/auth-type: cognito
+              alb.ingress.kubernetes.io/auth-idp-cognito: '{"userPoolARN":"arn:aws:cognito-idp:us-east-1:448049792905:userpool/us-east-1_nAQPDqkG7","userPoolClientID":"5p8k7lru5r9u8pampapovfrjek","userPoolDomain":"robot-shop-auth-9a01ca71"}'
+              alb.ingress.kubernetes.io/auth-scope: openid
+              alb.ingress.kubernetes.io/auth-session-timeout: "28800"
+              alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
           prometheusSpec:
+            # Without this the chart advertises http:// links (no ingress.tls is
+            # set because TLS terminates at the ALB). Alert notifications and the
+            # UI's own links must point at the public HTTPS URL.
+            externalUrl: https://prometheus.devopsportfolio.com
+
             # Discover ServiceMonitors / PodMonitors / PrometheusRules /
             # Probes / ScrapeConfigs in EVERY namespace, WITHOUT requiring
             # the "release: kube-prometheus-stack" label. Default behaviour
@@ -223,9 +266,41 @@ spec:
               limits:
                 memory: 128Mi
 
-          # Exposed via ALB Ingress in Task 2. Port-forward until then.
+          # https://grafana.devopsportfolio.com — uses Grafana's own login (admin
+          # credential from Secrets Manager via ESO). Same shared ALB as the shop
+          # and Prometheus; TLS terminates at the ALB with the wildcard ACM cert.
           ingress:
-            enabled: false
+            enabled: true
+            ingressClassName: alb
+            path: /
+            pathType: Prefix
+            hosts:
+              - grafana.devopsportfolio.com
+            annotations:
+              # ── shared ALB (group-wide, must match the shop Ingress) ──
+              alb.ingress.kubernetes.io/group.name: devopsportfolio-shared
+              alb.ingress.kubernetes.io/scheme: internet-facing
+              alb.ingress.kubernetes.io/target-type: ip
+              alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
+              alb.ingress.kubernetes.io/ssl-redirect: "443"
+              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:448049792905:certificate/292d8b16-6fbe-4536-983e-65997ed39049"
+              alb.ingress.kubernetes.io/load-balancer-attributes: routing.http.drop_invalid_header_fields.enabled=true
+              # ── this target group ──
+              # / redirects to /login (302), which would fail the health check.
+              alb.ingress.kubernetes.io/healthcheck-path: /api/health
+              alb.ingress.kubernetes.io/success-codes: "200"
+              external-dns.alpha.kubernetes.io/hostname: grafana.devopsportfolio.com
+
+          # Merged over the chart defaults (server.domain still derives from the
+          # ingress host automatically).
+          grafana.ini:
+            server:
+              # Public URL, used for redirects and links in alert notifications.
+              root_url: https://grafana.devopsportfolio.com
+            security:
+              cookie_secure: true
+            users:
+              allow_sign_up: false
 
         # ── kube-state-metrics / node-exporter ────────────────────────────
         kube-state-metrics:
