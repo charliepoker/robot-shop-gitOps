@@ -95,7 +95,7 @@ spec:
       verifyImages:
         - imageReferences:
             - "448049792905.dkr.ecr.us-east-1.amazonaws.com/*"
-          mutateDigest: true
+          mutateDigest: false   # required: Kyverno rejects mutateDigest:true under Audit
           verifyDigest: false
           required: true
           attestations:
