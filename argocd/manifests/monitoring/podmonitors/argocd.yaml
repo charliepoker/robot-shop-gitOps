@@ -21,9 +21,11 @@
 # (The suffix uses a hyphen on purpose: Prometheus would read "$1_metrics" as a
 # variable named 1_metrics and produce an empty job label.)
 #
-# The ApplicationSet controller is disabled in this install, so the dashboard's
-# ApplicationSet panels stay empty. Redis exposes no "metrics" port, so it is
-# skipped automatically.
+# The ApplicationSet controller IS running in this install (chart 10.1.3 deploys
+# it unconditionally; the applicationSet.enabled key in argocd-values.yaml is
+# ignored), so four jobs appear, including
+# argocd-applicationset-controller-metrics. Redis exposes no "metrics" port, so it
+# is skipped automatically.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
