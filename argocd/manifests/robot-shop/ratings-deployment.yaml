@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: ratings
-          image: 448049792905.dkr.ecr.us-east-1.amazonaws.com/ratings:4ea3c0048dd9bfb83c167815255786ba46c09d04
+          image: 448049792905.dkr.ecr.us-east-1.amazonaws.com/ratings:a3a6b0738f083344e5ba4487970a29d8ef9bb6c3
           imagePullPolicy: IfNotPresent
           envFrom:
             # PDO_URL, PDO_USER, PDO_PASSWORD — synced by ESO from
