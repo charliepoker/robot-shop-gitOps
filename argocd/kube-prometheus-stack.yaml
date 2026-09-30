@@ -1,0 +1,274 @@
+# kube-prometheus-stack — the metrics + alerting backbone.
+#
+# One chart, six components, each with a distinct job:
+#   prometheus-operator  Watches CRDs (ServiceMonitor, PodMonitor, PrometheusRule,
+#                        Prometheus, Alertmanager) and turns them into running
+#                        config. This is what makes monitoring declarative/GitOps.
+#   Prometheus           Pull-based TSDB. Scrapes /metrics endpoints, evaluates rules.
+#   Alertmanager         Dedupes, groups, silences and routes alerts (Slack in Task 5).
+#   Grafana              Visualisation. Stateless here — dashboards are code.
+#   kube-state-metrics   Exposes the STATE of K8s objects (desired vs ready replicas,
+#                        pod phase, restarts). Answers "what does the API think?".
+#   node-exporter        DaemonSet exposing host metrics (CPU, memory, disk, network)
+#                        of every node — including Karpenter Spot nodes.
+#
+# EKS-specific choices are commented inline. The short version: the EKS control
+# plane (etcd, scheduler, controller-manager) is AWS-managed and NOT scrapable, so
+# those ServiceMonitors and their alert rules are disabled — otherwise they fire
+# TargetDown alerts forever and train you to ignore alerts.
+#
+# Chart 91.8.2 = prometheus-operator v0.94.1, Grafana chart 13.2.7 (Grafana 13.2.x).
+# Confirm latest before bumping:
+#   helm show chart oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack | grep ^version
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    # After cert-manager (-5, issues the operator webhook cert) and storage (-5,
+    # the gp3 StorageClass the PVCs bind to). Before robot-shop (1), so the
+    # monitoring.coreos.com CRDs exist when later apps ship ServiceMonitors.
+    argocd.argoproj.io/sync-wave: "-3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  project: default
+
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "91.8.2"
+    helm:
+      # Pin the release name so resource names don't change if the
+      # Application is ever renamed.
+      releaseName: kube-prometheus-stack
+      values: |
+        # ── CRDs ──────────────────────────────────────────────────────────
+        # Installed by ArgoCD from the chart. They're huge (Prometheus CRD
+        # is >1MB), which is why ServerSideApply=true is set below.
+        crds:
+          enabled: true
+
+        # ── EKS managed control plane: not scrapable ─────────────────────
+        # AWS runs etcd / scheduler / controller-manager on hosts you don't
+        # own. Disabling these also removes their default alert rules
+        # (the rule templates are gated on <component>.enabled).
+        kubeEtcd:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
+
+        # These ARE reachable on EKS and stay on (chart defaults):
+        #   kubeApiServer — via the default/kubernetes Service
+        #   kubelet/cAdvisor — per-node, container CPU/memory
+        #   coreDns — kube-system, port 9153
+        #   kubeProxy — EKS kube-proxy binds metrics on 0.0.0.0:10249
+        windowsMonitoring:
+          enabled: false
+
+        defaultRules:
+          create: true
+          rules:
+            windows: false
+
+        # ── Prometheus Operator ───────────────────────────────────────────
+        prometheusOperator:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          admissionWebhooks:
+            # Validating webhook rejects malformed PrometheusRules at apply
+            # time. Its TLS cert comes from cert-manager (already running
+            # since Phase 2) instead of the chart's certgen hook Jobs —
+            # Helm hook Jobs are awkward under GitOps; a Certificate is a
+            # normal, declarative, self-renewing object.
+            certManager:
+              enabled: true
+            patch:
+              enabled: false
+            # Same stance as the Kyverno policies: a monitoring component
+            # hiccup must never block writes cluster-wide. Rule syntax is
+            # also validated in CI with promtool (Task 5).
+            failurePolicy: Ignore
+
+        # ── Prometheus ────────────────────────────────────────────────────
+        prometheus:
+          prometheusSpec:
+            # Discover ServiceMonitors / PodMonitors / PrometheusRules /
+            # Probes / ScrapeConfigs in EVERY namespace, WITHOUT requiring
+            # the "release: kube-prometheus-stack" label. Default behaviour
+            # silently ignores any monitor missing that label — the #1
+            # "my ServiceMonitor isn't scraped" bug.
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+            ruleSelectorNilUsesHelmValues: false
+            probeSelectorNilUsesHelmValues: false
+            scrapeConfigSelectorNilUsesHelmValues: false
+
+            scrapeInterval: 30s
+            evaluationInterval: 30s
+
+            # Cost vs history trade-off. ~15 days is enough to compare this
+            # week to last week and to baseline alert thresholds in Task 5.
+            # retentionSize is the safety net: TSDB deletes oldest blocks
+            # BEFORE the volume fills. It must stay below the PVC size, or a
+            # full disk crash-loops Prometheus and you lose monitoring
+            # exactly when you need it.
+            retention: 15d
+            retentionSize: 16GB
+
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: gp3
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 20Gi   # gp3 ~ $0.08/GB-mo -> ~$1.60/mo
+
+            resources:
+              requests:
+                cpu: 200m
+                memory: 768Mi
+              limits:
+                memory: 2Gi   # no CPU limit: throttling a TSDB causes scrape gaps
+
+            # Prefer the on-demand baseline node group over Karpenter Spot
+            # nodes. Soft preference: if baseline is full it still schedules
+            # anywhere. Keeps the stateful TSDB away from 2-minute Spot
+            # interruptions where possible, at zero extra cost.
+            affinity:
+              nodeAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    preference:
+                      matchExpressions:
+                        - key: role
+                          operator: In
+                          values: ["baseline"]
+
+        # ── Alertmanager ──────────────────────────────────────────────────
+        # Slack receiver is wired in Task 5. For now it runs the chart's
+        # default config (routes to a "null" receiver).
+        alertmanager:
+          alertmanagerSpec:
+            # Persists silences + the notification log, so a pod restart
+            # doesn't forget silences or re-page for already-sent alerts.
+            storage:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: gp3
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 1Gi
+            resources:
+              requests:
+                cpu: 10m
+                memory: 64Mi
+              limits:
+                memory: 128Mi
+            affinity:
+              nodeAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    preference:
+                      matchExpressions:
+                        - key: role
+                          operator: In
+                          values: ["baseline"]
+
+        # ── Grafana ───────────────────────────────────────────────────────
+        grafana:
+          # Admin credential comes from AWS Secrets Manager via ESO
+          # (monitoring-secrets Application). Without this the Grafana chart
+          # generates a random password with randAlphaNum on every render —
+          # ArgoCD renders with `helm template`, so the Secret changes every
+          # reconcile and the app is permanently OutOfSync.
+          admin:
+            existingSecret: grafana-admin
+            userKey: admin-user
+            passwordKey: admin-password
+
+          # Stateless by design: datasources and dashboards are provisioned
+          # from ConfigMaps by the sidecar, so there's nothing on disk worth
+          # keeping. No PVC = no cost, no AZ pinning, and a rebuilt cluster
+          # gets identical dashboards from Git.
+          persistence:
+            enabled: false
+
+          defaultDashboardsTimezone: browser
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              memory: 512Mi
+
+          sidecar:
+            resources:
+              requests:
+                cpu: 10m
+                memory: 64Mi
+              limits:
+                memory: 128Mi
+
+          # Exposed via ALB Ingress in Task 2. Port-forward until then.
+          ingress:
+            enabled: false
+
+        # ── kube-state-metrics / node-exporter ────────────────────────────
+        kube-state-metrics:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+
+        prometheus-node-exporter:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # The namespace is created by THIS app (it syncs first, wave -3).
+    # node-exporter needs hostNetwork/hostPID/hostPath to read the node's
+    # /proc and /sys, so the namespace must allow privileged pods. Declared
+    # explicitly so it's a visible, reviewable decision rather than an
+    # accident of cluster defaults.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/audit: baseline
+        pod-security.kubernetes.io/warn: baseline
+        app.kubernetes.io/part-of: observability
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # CRDs exceed the 256KB last-applied annotation limit
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
