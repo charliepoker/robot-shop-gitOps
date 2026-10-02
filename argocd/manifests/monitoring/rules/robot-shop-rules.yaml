@@ -1,0 +1,155 @@
+# Custom alert rules for Robot Shop and the platform underneath it.
+#
+# The kube-prometheus-stack chart already ships 139 default alerts (pod crash
+# loops, node memory, deployment replica mismatch, target down, ...). Those are
+# NOT repeated here. These rules exist only where the defaults leave a gap:
+#
+#   - Robot Shop's services expose no HTTP error-rate or latency metrics, so the
+#     user-facing signal comes from a synthetic probe (see ../probes).
+#   - KubePodCrashLooping waits 15 minutes; the Phase 7 broken-deploy drill needs
+#     detection in minutes, so a faster rule scoped to robot-shop is added.
+#   - Nothing in the defaults compares a container's memory to its OWN limit.
+#   - The platform components (cert-manager, external-secrets, Argo Rollouts,
+#     Velero) are scraped for the first time in Task 5, so their health alerts
+#     live here. Each maps to a Phase 7 chaos scenario.
+#
+# Metric names were read from each project's source at the pinned chart's app
+# version. Every rule has a unit test in tests/monitoring/ (run
+# scripts/check-monitoring.sh).
+#
+# Thresholds are starting points. Tune them from the baselines Prometheus has
+# collected after a day or two, not from guesses.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: robot-shop-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: robot-shop-rules
+    app.kubernetes.io/part-of: observability
+spec:
+  groups:
+    # ── What a user would notice ──────────────────────────────────────────
+    - name: robot-shop.availability
+      rules:
+        - alert: ShopDown
+          expr: probe_success{instance="https://shop.devopsportfolio.com"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "The shop is not reachable"
+            description: "The synthetic probe to {{ $labels.instance }} has failed for 2 minutes. This covers DNS, TLS, the ALB and the web pods."
+
+        - alert: ShopSlow
+          # A probe measures one request at a time, so this averages 5 minutes
+          # instead of pretending to be a p95. Check the baseline first:
+          #   avg_over_time(probe_duration_seconds{instance="https://shop.devopsportfolio.com"}[1h])
+          expr: avg_over_time(probe_duration_seconds{instance="https://shop.devopsportfolio.com"}[5m]) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "The shop is responding slowly"
+            description: "Probe response time for {{ $labels.instance }} has averaged {{ $value | humanizeDuration }} over 5 minutes."
+
+        - alert: PublicEndpointDown
+          expr: probe_success{instance!="https://shop.devopsportfolio.com"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A public endpoint is not reachable"
+            description: "The synthetic probe to {{ $labels.instance }} has failed for 5 minutes."
+
+        - alert: PublicEndpointCertificateExpiringSoon
+          # probe_ssl_earliest_cert_expiry is 0 when no TLS handshake happened,
+          # so require > 0 or a plain outage would look like an expiring cert.
+          expr: probe_ssl_earliest_cert_expiry > 0 and (probe_ssl_earliest_cert_expiry - time()) < 14 * 24 * 3600
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "A public TLS certificate expires within 14 days"
+            description: "The certificate served by {{ $labels.instance }} expires within 14 days. ACM should have renewed it automatically."
+
+    # ── Workload health (gaps in the defaults) ────────────────────────────
+    - name: robot-shop.workloads
+      rules:
+        - alert: RobotShopPodCrashLooping
+          # The default KubePodCrashLooping waits 15 minutes. This catches a
+          # broken deploy (including a canary pod) in about 2.
+          expr: kube_pod_container_status_waiting_reason{namespace="robot-shop", reason="CrashLoopBackOff"} == 1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A Robot Shop container is crash-looping"
+            description: "{{ $labels.namespace }}/{{ $labels.pod }} (container {{ $labels.container }}) has been in CrashLoopBackOff for 2 minutes."
+
+        - alert: ContainerNearMemoryLimit
+          # Working set is what the kernel OOM-kills on. max by() on both sides
+          # drops series that have no memory limit, and the join needs no
+          # label gymnastics.
+          expr: |
+            max by (namespace, pod, container) (container_memory_working_set_bytes{container!="", container!="POD"})
+              /
+            max by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory"})
+              > 0.85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A container is using over 85% of its memory limit"
+            description: "{{ $labels.namespace }}/{{ $labels.pod }} (container {{ $labels.container }}) is at {{ $value | humanizePercentage }} of its memory limit. Memory is not compressible: past 100% the container is OOM-killed."
+
+    # ── Platform components (scraped for the first time in Task 5) ────────
+    - name: platform
+      rules:
+        - alert: CertManagerCertificateNotReady
+          expr: certmanager_certificate_ready_status{condition="False"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A cert-manager certificate is not ready"
+            description: "Certificate {{ $labels.namespace }}/{{ $labels.name }} has not been Ready for 10 minutes. Check: kubectl describe certificate {{ $labels.name }} -n {{ $labels.namespace }}."
+
+        - alert: CertManagerCertificateExpiringSoon
+          # cert-manager renews well before expiry, so this only fires when
+          # automatic renewal has been failing for a while.
+          expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 21 * 24 * 3600
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A cert-manager certificate expires within 21 days"
+            description: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in under 21 days and has not been renewed."
+
+        - alert: ExternalSecretNotSynced
+          expr: externalsecret_status_condition{condition="Ready", status="False"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "An ExternalSecret is not syncing"
+            description: "ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} has not been Ready for 10 minutes, so its Kubernetes Secret is going stale."
+
+        - alert: VeleroBackupFailed
+          expr: increase(velero_backup_failure_total[1h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "A Velero backup failed"
+            description: "Velero schedule '{{ $labels.schedule }}' recorded a failed backup in the last hour."
+
+        - alert: RolloutAbortedOrFailed
+          # "Abort" is the canary doing its job: it was rolled back and the
+          # previous version is serving. It still deserves a look at why.
+          expr: rollout_info{phase=~"Abort|Error|Timeout|InvalidSpec"} == 1
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "An Argo Rollout is aborted or failed"
+            description: "Rollout {{ $labels.namespace }}/{{ $labels.name }} is in phase {{ $labels.phase }}. If Abort, the canary was rolled back automatically."

@@ -1,0 +1,67 @@
+name: monitoring-validate
+
+# Validates alert rules (promtool syntax + unit tests) and the Alertmanager config
+# (amtool, plus asserted routing) on every pull request, so a broken rule or a
+# mis-routed alert is caught before ArgoCD ever applies it.
+#
+# No `paths:` filter on purpose. If this job is ever made a REQUIRED status check, a
+# path-filtered workflow that does not run leaves the PR waiting forever on a
+# check that will never report. It takes about a minute, so it simply runs always.
+#
+# Supply chain, in line with the pipeline rules used on the app repo:
+#   - the checkout action is pinned to a full commit SHA, not a tag
+#   - promtool and amtool are pinned releases whose sha256 is verified (the
+#     checksums were cross-checked against each release's official sha256sums.txt)
+#   - the job token is read-only
+#
+# To bump a tool: change the version AND its sha256 together, taking the new hash
+# from that release's sha256sums.txt on GitHub.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-monitoring:
+    name: validate-monitoring
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install promtool and amtool (pinned, checksum-verified)
+        env:
+          PROMETHEUS_VERSION: "3.15.0"
+          PROMETHEUS_SHA256: "2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0"
+          ALERTMANAGER_VERSION: "0.34.1"
+          ALERTMANAGER_SHA256: "265b9d1e55ef0d5306a436018af6d2b686c2ce051f03d968f7464ecb1372a7e8"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+
+          prom="prometheus-${PROMETHEUS_VERSION}.linux-amd64"
+          curl -fsSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${prom}.tar.gz"
+          echo "${PROMETHEUS_SHA256}  ${prom}.tar.gz" | sha256sum -c -
+          tar xzf "${prom}.tar.gz"
+
+          am="alertmanager-${ALERTMANAGER_VERSION}.linux-amd64"
+          curl -fsSLO "https://github.com/prometheus/alertmanager/releases/download/v${ALERTMANAGER_VERSION}/${am}.tar.gz"
+          echo "${ALERTMANAGER_SHA256}  ${am}.tar.gz" | sha256sum -c -
+          tar xzf "${am}.tar.gz"
+
+          echo "$RUNNER_TEMP/${prom}" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/${am}" >> "$GITHUB_PATH"
+
+      - name: Install PyYAML in an isolated virtualenv
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "pyyaml==6.0.3"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Validate alert rules and Alertmanager routing
+        run: bash scripts/check-monitoring.sh
