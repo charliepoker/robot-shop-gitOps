@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Validate the monitoring configuration before it reaches the cluster.
 #
-#   1. Alert rules:   promtool check + the unit tests in tests/monitoring/
-#   2. Alertmanager:  amtool check-config, then routing decisions asserted
-#                     (e.g. a critical alert MUST reach Slack, Watchdog must not)
+#   1. Manifest sanity: every YAML under argocd/apps and argocd/manifests is a real
+#                       Kubernetes object (has apiVersion and kind)
+#   2. Alert rules:     promtool check + the unit tests in tests/monitoring/
+#   3. Alertmanager:    amtool check-config, then routing decisions asserted
+#                       (e.g. a critical alert MUST reach Slack, Watchdog must not)
 #
 # The same script runs locally and in CI (.github/workflows/monitoring-validate.yml).
 #
@@ -24,7 +26,43 @@ python3 -c 'import yaml' 2>/dev/null || fail "PyYAML missing: pip3 install pyyam
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "== 1/2  Alert rules =="
+echo "== 1/3  Manifest sanity =="
+
+# ArgoCD applies EVERY .yaml file under an Application's path as a Kubernetes object.
+# One stray file (a unit test, a values file, notes) that is not one makes the whole
+# Application fail to render, and everything else in that folder stops syncing with
+# it. This has happened here three times, always as a file one folder off.
+python3 - <<'PY'
+import glob, sys, yaml
+
+problems, checked = [], 0
+for pattern in ('argocd/apps/**/*.yaml', 'argocd/apps/**/*.yml',
+                'argocd/manifests/**/*.yaml', 'argocd/manifests/**/*.yml'):
+    for path in sorted(glob.glob(pattern, recursive=True)):
+        try:
+            docs = list(yaml.safe_load_all(open(path)))
+        except yaml.YAMLError as err:
+            problems.append(f'{path}: not valid YAML ({type(err).__name__})')
+            continue
+        checked += 1
+        for number, doc in enumerate(docs, start=1):
+            if doc is None:
+                continue
+            if not isinstance(doc, dict) or 'apiVersion' not in doc or 'kind' not in doc:
+                what = ('top-level keys: ' + ', '.join(list(doc)[:3])) if isinstance(doc, dict) else 'it is plain text, not a mapping'
+                problems.append(f'{path} (document {number}): no apiVersion/kind; {what}')
+
+if problems:
+    print('These files are not Kubernetes objects, but ArgoCD would try to apply them:', file=sys.stderr)
+    for p in problems:
+        print(f'  - {p}', file=sys.stderr)
+    print('\nMove them outside argocd/ (unit tests belong in tests/monitoring/).', file=sys.stderr)
+    sys.exit(1)
+print(f'{checked} manifest files checked; all are Kubernetes objects')
+PY
+
+echo
+echo "== 2/3  Alert rules =="
 
 # A PrometheusRule is a Kubernetes object; promtool wants the plain rules file,
 # which is just its .spec.
@@ -46,14 +84,27 @@ for rules in "$WORK"/*.rules.yaml; do
   promtool check rules "$rules"
 done
 
+# Rules without tests are not allowed through: a rule that always fires or never
+# fires looks fine to a syntax check.
+shopt -s nullglob
+tests=(tests/monitoring/*.test.yaml)
+if [ "${#tests[@]}" -eq 0 ]; then
+  stray="$(find . -name '*.test.yaml' -not -path './.git/*' 2>/dev/null || true)"
+  if [ -n "$stray" ]; then
+    echo "Found test file(s) in the wrong place:" >&2
+    echo "$stray" | sed 's/^/  /' >&2
+  fi
+  fail "no unit tests found at tests/monitoring/*.test.yaml"
+fi
+
 # The tests refer to the extracted file by bare name, so run them beside it.
-cp tests/monitoring/*.test.yaml "$WORK"/
-for t in "$WORK"/*.test.yaml; do
+cp "${tests[@]}" "$WORK"/
+for t in "${tests[@]}"; do
   (cd "$WORK" && promtool test rules "$(basename "$t")")
 done
 
 echo
-echo "== 2/2  Alertmanager config and routing =="
+echo "== 3/3  Alertmanager config and routing =="
 
 # The config is embedded as a string inside the kube-prometheus-stack Application.
 # api_url_file points at a mounted Secret that does not exist here, so swap in a
