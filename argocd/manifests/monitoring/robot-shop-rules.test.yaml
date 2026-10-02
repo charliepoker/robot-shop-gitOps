@@ -1,0 +1,438 @@
+# Unit tests for argocd/manifests/monitoring/rules/robot-shop-rules.yaml
+#
+# Run:  scripts/check-monitoring.sh
+# That script extracts the rules from the PrometheusRule manifest into a plain
+# rules file next to a copy of this test, which is why rule_files below is a bare
+# filename. Running promtool on this file directly will not find it.
+#
+# Every alert has at least one case that must fire AND one that must stay quiet.
+# A rule that always fires or never fires is the usual failure, and a test that
+# only checks "it fires" would not catch it.
+#
+# Series are 1 sample per minute. promtool evaluates at the interval below and the
+# fake clock starts at 0, so time() inside a rule is the elapsed seconds.
+rule_files:
+  - robot-shop-rules.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ───────────────────────────── ShopDown ─────────────────────────────
+  - name: ShopDown is pending, not firing, before 2 minutes of failure
+    interval: 1m
+    input_series:
+      - series: 'probe_success{instance="https://shop.devopsportfolio.com", job="probe/monitoring/public-endpoints"}'
+        values: '1 1 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ShopDown
+        exp_alerts: []
+
+  - name: ShopDown fires after 2 minutes of failed probes
+    interval: 1m
+    input_series:
+      - series: 'probe_success{instance="https://shop.devopsportfolio.com", job="probe/monitoring/public-endpoints"}'
+        values: '1 1 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ShopDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: https://shop.devopsportfolio.com
+              job: probe/monitoring/public-endpoints
+            exp_annotations:
+              summary: "The shop is not reachable"
+              description: "The synthetic probe to https://shop.devopsportfolio.com has failed for 2 minutes. This covers DNS, TLS, the ALB and the web pods."
+
+  - name: ShopDown stays quiet while the shop is up
+    interval: 1m
+    input_series:
+      - series: 'probe_success{instance="https://shop.devopsportfolio.com"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ShopDown
+        exp_alerts: []
+
+  - name: ShopDown ignores a different endpoint being down
+    interval: 1m
+    input_series:
+      - series: 'probe_success{instance="https://grafana.devopsportfolio.com/api/health"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ShopDown
+        exp_alerts: []
+
+  # ───────────────────────────── ShopSlow ─────────────────────────────
+  - name: ShopSlow fires when the 5m average stays above 1s
+    interval: 1m
+    input_series:
+      - series: 'probe_duration_seconds{instance="https://shop.devopsportfolio.com"}'
+        values: '2+0x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ShopSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: https://shop.devopsportfolio.com
+            exp_annotations:
+              summary: "The shop is responding slowly"
+              description: "Probe response time for https://shop.devopsportfolio.com has averaged 2s over 5 minutes."
+
+  - name: ShopSlow stays quiet at a healthy 300ms
+    interval: 1m
+    input_series:
+      - series: 'probe_duration_seconds{instance="https://shop.devopsportfolio.com"}'
+        values: '0.3+0x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ShopSlow
+        exp_alerts: []
+
+  - name: ShopSlow ignores a single slow probe (the average absorbs it)
+    interval: 1m
+    input_series:
+      - series: 'probe_duration_seconds{instance="https://shop.devopsportfolio.com"}'
+        values: '0.3 0.3 0.3 0.3 0.3 0.3 5 0.3 0.3 0.3 0.3 0.3 0.3 0.3 0.3'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ShopSlow
+        exp_alerts: []
+
+  # One slow request every 5 minutes: each 5m window holds four 0.3s probes and one
+  # 3s probe, so the AVERAGE is 0.84s (under the 1s threshold) while the MAXIMUM is
+  # always 3s. This is what proves the rule averages instead of reacting to
+  # the worst single request.
+  - name: ShopSlow averages rather than reacting to a recurring single spike
+    interval: 1m
+    input_series:
+      - series: 'probe_duration_seconds{instance="https://shop.devopsportfolio.com"}'
+        values: '0.3 0.3 0.3 0.3 3 0.3 0.3 0.3 0.3 3 0.3 0.3 0.3 0.3 3 0.3 0.3 0.3 0.3 3 0.3 0.3 0.3 0.3 3'
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: ShopSlow
+        exp_alerts: []
+
+  # ───────────────────────── PublicEndpointDown ───────────────────────
+  - name: PublicEndpointDown fires for a non-shop endpoint after 5 minutes
+    interval: 1m
+    input_series:
+      - series: 'probe_success{instance="https://grafana.devopsportfolio.com/api/health"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PublicEndpointDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: https://grafana.devopsportfolio.com/api/health
+            exp_annotations:
+              summary: "A public endpoint is not reachable"
+              description: "The synthetic probe to https://grafana.devopsportfolio.com/api/health has failed for 5 minutes."
+
+  - name: PublicEndpointDown does not duplicate ShopDown for the shop
+    interval: 1m
+    input_series:
+      - series: 'probe_success{instance="https://shop.devopsportfolio.com"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PublicEndpointDown
+        exp_alerts: []
+
+  # ─────────────── PublicEndpointCertificateExpiringSoon ──────────────
+  # time() starts at 0, so a timestamp of 1,000,000 is about 11.6 days away.
+  - name: Certificate alert fires when expiry is under 14 days away
+    interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{instance="https://shop.devopsportfolio.com"}'
+        values: '1000000+0x100'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: PublicEndpointCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: https://shop.devopsportfolio.com
+            exp_annotations:
+              summary: "A public TLS certificate expires within 14 days"
+              description: "The certificate served by https://shop.devopsportfolio.com expires within 14 days. ACM should have renewed it automatically."
+
+  - name: Certificate alert stays quiet with plenty of time left
+    interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{instance="https://shop.devopsportfolio.com"}'
+        values: '5000000+0x100'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: PublicEndpointCertificateExpiringSoon
+        exp_alerts: []
+
+  - name: Certificate alert does not mistake an outage (expiry reported as 0) for expiry
+    interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{instance="https://shop.devopsportfolio.com"}'
+        values: '0+0x100'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: PublicEndpointCertificateExpiringSoon
+        exp_alerts: []
+
+  # ───────────────────── RobotShopPodCrashLooping ─────────────────────
+  - name: Crash loop in robot-shop fires after 2 minutes
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="robot-shop", pod="user-abc", container="user", reason="CrashLoopBackOff"}'
+        values: '0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RobotShopPodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: robot-shop
+              pod: user-abc
+              container: user
+              reason: CrashLoopBackOff
+            exp_annotations:
+              summary: "A Robot Shop container is crash-looping"
+              description: "robot-shop/user-abc (container user) has been in CrashLoopBackOff for 2 minutes."
+
+  - name: Crash loop outside robot-shop is left to the default alert
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="monitoring", pod="x", container="x", reason="CrashLoopBackOff"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RobotShopPodCrashLooping
+        exp_alerts: []
+
+  - name: A different waiting reason does not count as a crash loop
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="robot-shop", pod="x", container="x", reason="ContainerCreating"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RobotShopPodCrashLooping
+        exp_alerts: []
+
+  # ───────────────────── ContainerNearMemoryLimit ─────────────────────
+  # 943718400 B = 900 MiB against a 1 GiB limit = 87.9%
+  - name: Memory alert fires above 85% of the container's own limit
+    interval: 1m
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="grafana-1", container="grafana", job="kubelet"}'
+        values: '943718400+0x20'
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="grafana-1", container="grafana", resource="memory", unit="byte"}'
+        values: '1073741824+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ContainerNearMemoryLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              pod: grafana-1
+              container: grafana
+            exp_annotations:
+              summary: "A container is using over 85% of its memory limit"
+              description: "monitoring/grafana-1 (container grafana) is at 87.89% of its memory limit. Memory is not compressible: past 100% the container is OOM-killed."
+
+  - name: Memory alert stays quiet at 50% of the limit
+    interval: 1m
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="grafana-1", container="grafana"}'
+        values: '536870912+0x20'
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="grafana-1", container="grafana", resource="memory"}'
+        values: '1073741824+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ContainerNearMemoryLimit
+        exp_alerts: []
+
+  - name: Memory alert ignores containers that have no memory limit
+    interval: 1m
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="nolimit-1", container="app"}'
+        values: '943718400+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ContainerNearMemoryLimit
+        exp_alerts: []
+
+  - name: Memory alert ignores the pod-level cgroup series (empty container label)
+    interval: 1m
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="p", container=""}'
+        values: '943718400+0x20'
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="p", container="", resource="memory"}'
+        values: '1073741824+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ContainerNearMemoryLimit
+        exp_alerts: []
+
+  # ─────────────────── CertManagerCertificateNotReady ─────────────────
+  - name: Unready certificate fires after 10 minutes
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_ready_status{condition="False", name="shop-cert", namespace="robot-shop"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CertManagerCertificateNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              condition: "False"
+              name: shop-cert
+              namespace: robot-shop
+            exp_annotations:
+              summary: "A cert-manager certificate is not ready"
+              description: "Certificate robot-shop/shop-cert has not been Ready for 10 minutes. Check: kubectl describe certificate shop-cert -n robot-shop."
+
+  - name: Ready certificate stays quiet
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_ready_status{condition="True", name="shop-cert", namespace="robot-shop"}'
+        values: '1+0x20'
+      - series: 'certmanager_certificate_ready_status{condition="False", name="shop-cert", namespace="robot-shop"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CertManagerCertificateNotReady
+        exp_alerts: []
+
+  # ────────────────── CertManagerCertificateExpiringSoon ──────────────
+  - name: cert-manager expiry alert fires when renewal has not happened within 21 days
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{name="shop-cert", namespace="robot-shop"}'
+        values: '1500000+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CertManagerCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              name: shop-cert
+              namespace: robot-shop
+            exp_annotations:
+              summary: "A cert-manager certificate expires within 21 days"
+              description: "Certificate robot-shop/shop-cert expires in under 21 days and has not been renewed."
+
+  - name: cert-manager expiry alert stays quiet for a freshly renewed certificate
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{name="shop-cert", namespace="robot-shop"}'
+        values: '7776000+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CertManagerCertificateExpiringSoon
+        exp_alerts: []
+
+  # ───────────────────────── ExternalSecretNotSynced ──────────────────
+  - name: ExternalSecret that is not Ready fires after 10 minutes
+    interval: 1m
+    input_series:
+      - series: 'externalsecret_status_condition{condition="Ready", status="False", name="rds-credentials", namespace="robot-shop"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ExternalSecretNotSynced
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              condition: Ready
+              status: "False"
+              name: rds-credentials
+              namespace: robot-shop
+            exp_annotations:
+              summary: "An ExternalSecret is not syncing"
+              description: "ExternalSecret robot-shop/rds-credentials has not been Ready for 10 minutes, so its Kubernetes Secret is going stale."
+
+  - name: ExternalSecret that is Ready stays quiet
+    interval: 1m
+    input_series:
+      - series: 'externalsecret_status_condition{condition="Ready", status="True", name="rds-credentials", namespace="robot-shop"}'
+        values: '1+0x20'
+      - series: 'externalsecret_status_condition{condition="Ready", status="False", name="rds-credentials", namespace="robot-shop"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ExternalSecretNotSynced
+        exp_alerts: []
+
+  # ───────────────────────── VeleroBackupFailed ───────────────────────
+  - name: Velero alert fires when the failure counter increases
+    interval: 1m
+    input_series:
+      - series: 'velero_backup_failure_total{schedule="daily"}'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: VeleroBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              schedule: daily
+            exp_annotations:
+              summary: "A Velero backup failed"
+              description: "Velero schedule 'daily' recorded a failed backup in the last hour."
+
+  - name: Velero alert stays quiet while the counter is flat
+    interval: 1m
+    input_series:
+      - series: 'velero_backup_failure_total{schedule="daily"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: VeleroBackupFailed
+        exp_alerts: []
+
+  # ───────────────────────── RolloutAbortedOrFailed ───────────────────
+  # (An empty label value such as traffic_router="" is the same as no label in
+  # Prometheus, so the firing alert correctly does not carry it.)
+  - name: An aborted rollout fires after 1 minute
+    interval: 1m
+    input_series:
+      - series: 'rollout_info{namespace="robot-shop", name="user", phase="Abort", strategy="canary", traffic_router=""}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RolloutAbortedOrFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: robot-shop
+              name: user
+              phase: Abort
+              strategy: canary
+            exp_annotations:
+              summary: "An Argo Rollout is aborted or failed"
+              description: "Rollout robot-shop/user is in phase Abort. If Abort, the canary was rolled back automatically."
+
+  - name: A paused canary (normal mid-rollout) does not alert
+    interval: 1m
+    input_series:
+      - series: 'rollout_info{namespace="robot-shop", name="user", phase="Paused", strategy="canary", traffic_router=""}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RolloutAbortedOrFailed
+        exp_alerts: []
+
+  - name: A completed rollout does not alert
+    interval: 1m
+    input_series:
+      - series: 'rollout_info{namespace="robot-shop", name="user", phase="Completed", strategy="canary", traffic_router=""}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RolloutAbortedOrFailed
+        exp_alerts: []

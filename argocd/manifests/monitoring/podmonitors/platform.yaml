@@ -1,0 +1,117 @@
+# Scrape targets for the platform components that, until Task 5, were running
+# unobserved. All five already expose a NAMED metrics port on their pods (checked
+# in each chart at the version pinned here), so PodMonitors need no Services and
+# no change to the charts or their values.
+#
+# Why PodMonitors here instead of each chart's own ServiceMonitor switch:
+#   - cert-manager syncs at wave -5, before kube-prometheus-stack (-3) installs the
+#     ServiceMonitor/PodMonitor CRDs. Turning on a chart-managed ServiceMonitor
+#     there would fail on a cold cluster rebuild. This file lives in
+#     monitoring-config, which applies after the CRDs exist.
+#   - All monitoring wiring sits in one reviewable folder.
+#
+# jobLabel makes job="<app name>" (e.g. job="velero") instead of
+# "monitoring/<podmonitor-name>", so queries and alerts read naturally.
+#
+# Each one maps to a Phase 7 chaos scenario:
+#   cert-manager      -> 4  certificate renewal
+#   external-secrets  -> 5  secret rotation
+#   karpenter         -> 3  node failure, 6  traffic spike
+#   argo-rollouts     -> 1  broken deployment, 7  rollback
+#   velero            -> Phase 8 backup and restore
+#
+#   cert-manager      chart v1.21.0      port http-metrics  (9402)
+#   external-secrets  chart 2.7.0        port metrics       (8080)
+#   karpenter         chart 1.7.1        port http-metrics  (8080)
+#   argo-rollouts     chart 2.41.0       port metrics       (8090)
+#   velero            chart 12.1.0       port http-monitoring (8085, needs metrics.enabled)
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: cert-manager
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames: [cert-manager]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cert-manager
+      app.kubernetes.io/component: controller   # not the webhook or cainjector
+  podMetricsEndpoints:
+    - port: http-metrics
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: external-secrets
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames: [external-secrets]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets   # the controller; webhook and cert-controller have other names
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: karpenter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames: [kube-system]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: karpenter
+  podMetricsEndpoints:
+    - port: http-metrics
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: argo-rollouts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames: [argo-rollouts]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argo-rollouts
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: velero
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames: [velero]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: velero
+  podMetricsEndpoints:
+    - port: http-monitoring
+      path: /metrics

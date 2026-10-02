@@ -1,0 +1,86 @@
+# Blackbox exporter: the synthetic user. Probes public URLs from inside the cluster
+# and reports availability, response time, HTTP status and TLS certificate expiry.
+#
+# Why it exists: Robot Shop's services expose no HTTP error-rate or latency
+# metrics, so there is nothing to compute a real 5xx rate or p95 from. This gives
+# the "is the shop up and how fast" signal from the user's side instead.
+# What it covers: DNS -> TLS -> ALB -> web pods, end to end, via the PUBLIC URL.
+# What it does not: a real-user p95 or per-endpoint error rate (a probe measures
+# one request at a time). That limit is documented, not hidden.
+#
+# The targets live in monitoring-config (probes/public-endpoints.yaml).
+# Pinned: chart 11.19.1 (published), exporter v0.28.0.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: blackbox-exporter
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  project: default
+
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: prometheus-blackbox-exporter
+    targetRevision: "11.19.1"
+    helm:
+      releaseName: blackbox-exporter
+      values: |
+        # Short, stable DNS name for the Probe: blackbox-exporter.monitoring.svc:9115
+        fullnameOverride: blackbox-exporter
+        replicas: 1
+
+        # Stateless and tiny. Sized from a run of the real v0.28.0 binary
+        # probing HTTPS endpoints (see the Task 5 notes): well under these.
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 64Mi
+
+        # The chart already runs it hardened: non-root, read-only root filesystem,
+        # no privilege escalation, all capabilities dropped. The image comes from
+        # quay.io, so it avoids Docker Hub's anonymous pull limits.
+
+        config:
+          modules:
+            # Strict HTTPS check used by every Probe in monitoring-config:
+            #  - fail_if_not_ssl: a plain-HTTP downgrade counts as down
+            #  - 2xx only (valid_status_codes empty = any 2xx), redirects followed
+            #  - IPv4 only, no fallback: the VPC and NAT are IPv4, so letting it try
+            #    IPv6 would turn a healthy site into a false "down"
+            https_2xx:
+              prober: http
+              timeout: 10s
+              http:
+                method: GET
+                valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+                follow_redirects: true
+                fail_if_not_ssl: true
+                preferred_ip_protocol: ip4
+                ip_protocol_fallback: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The monitoring namespace belongs to the kube-prometheus-stack Application.
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

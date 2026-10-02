@@ -1,0 +1,35 @@
+# Synthetic probes of the public URLs, driven by the blackbox exporter.
+#
+# Each target becomes a series labelled instance="<url>", which is what the
+# ShopDown / ShopSlow / PublicEndpoint* rules key on. The probe goes out through the
+# NAT gateway and back in through the ALB, so it exercises the same path a real
+# user takes (DNS, TLS, ALB listener rule, target group, pod). It costs a few KB
+# of NAT traffic per minute.
+#
+# Not probed on purpose:
+#   prometheus.devopsportfolio.com  sits behind a Cognito login, so a probe would
+#                                   only ever measure the login redirect.
+#
+# The paths below are health endpoints that answer 200 without credentials:
+#   grafana  /api/health   (its root redirects to /login)
+#   argocd   /healthz      (the server runs --insecure behind the ALB)
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: public-endpoints
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: public-endpoints
+    app.kubernetes.io/part-of: observability
+spec:
+  interval: 30s
+  scrapeTimeout: 15s       # must exceed the module's 10s timeout
+  module: https_2xx
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://shop.devopsportfolio.com
+        - https://grafana.devopsportfolio.com/api/health
+        - https://argocd.devopsportfolio.com/healthz

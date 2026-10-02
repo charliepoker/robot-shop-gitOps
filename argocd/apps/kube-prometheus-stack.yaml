@@ -200,10 +200,82 @@ spec:
                           values: ["baseline"]
 
         # ── Alertmanager ──────────────────────────────────────────────────
-        # Slack receiver is wired in Task 5. For now it runs the chart's
-        # default config (routes to a "null" receiver).
+        # Warning and critical alerts go to Slack; info-level and everything
+        # unlabelled goes to the "null" receiver, so the 139 default rules don't turn
+        # the channel into noise. Tune from the Alerts page after a day of data.
+        #
+        # The webhook URL is NOT in this file: it is read from a mounted file that
+        # External Secrets populates from AWS Secrets Manager (see
+        # monitoring-secrets/externalsecret-alertmanager-slack.yaml). The pod will not
+        # start until that Secret exists, so apply the Terraform change first.
         alertmanager:
+          # tplConfig is false in this chart, so Helm leaves the {{ }} below alone
+          # and they are Alertmanager templates, not Helm templates.
+          config:
+            global:
+              resolve_timeout: 5m
+            # Unchanged chart defaults: a critical alert silences the warning and
+            # info versions of the same alert, and InfoInhibitor mutes info noise.
+            inhibit_rules:
+              - source_matchers:
+                  - 'severity = critical'
+                target_matchers:
+                  - 'severity =~ warning|info'
+                equal:
+                  - 'namespace'
+                  - 'alertname'
+              - source_matchers:
+                  - 'severity = warning'
+                target_matchers:
+                  - 'severity = info'
+                equal:
+                  - 'namespace'
+                  - 'alertname'
+              - source_matchers:
+                  - 'alertname = InfoInhibitor'
+                target_matchers:
+                  - 'severity = info'
+                equal:
+                  - 'namespace'
+              - target_matchers:
+                  - 'alertname = InfoInhibitor'
+            route:
+              receiver: "null"
+              # One Slack message per alert type per namespace, not one per namespace.
+              group_by: ["namespace", "alertname"]
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 12h
+              routes:
+                # Watchdog fires forever by design: it proves the pipeline is alive.
+                # It would feed an external heartbeat service; there is none here.
+                - receiver: "null"
+                  matchers:
+                    - alertname = "Watchdog"
+                - receiver: slack
+                  matchers:
+                    - severity =~ "warning|critical"
+            receivers:
+              - name: "null"
+              - name: slack
+                slack_configs:
+                  - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+                    send_resolved: true
+                    color: '{{ if eq .Status "resolved" }}good{{ else if eq .CommonLabels.severity "critical" }}danger{{ else }}warning{{ end }}'
+                    title: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}'
+                    # Opens the query in Prometheus (behind the Cognito login).
+                    title_link: '{{ (index .Alerts 0).GeneratorURL }}'
+                    text: |-
+                      {{ range .Alerts }}{{ .Labels.severity | toUpper }}: {{ .Annotations.summary }}
+                      {{ .Annotations.description }}
+                      {{ end }}
+            templates:
+              - '/etc/alertmanager/config/*.tmpl'
           alertmanagerSpec:
+            # Mounts Secret alertmanager-slack at
+            # /etc/alertmanager/secrets/alertmanager-slack/ (see api_url_file above).
+            secrets:
+              - alertmanager-slack
             # Persists silences + the notification log, so a pod restart
             # doesn't forget silences or re-page for already-sent alerts.
             storage:

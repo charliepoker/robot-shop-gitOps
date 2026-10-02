@@ -1,0 +1,37 @@
+# Robot Shop's own metrics. Only two of its eight services expose Prometheus
+# metrics at all (checked in the app source):
+#
+#   cart     /metrics  one custom counter:  items_added
+#   payment  /metrics  business metrics:    sold_count, units_sold, cart_value
+#
+# These are BUSINESS counters, not request metrics: there is no HTTP status code or
+# latency in either, which is why availability comes from the synthetic probe. They
+# are still worth scraping (a cart that stops counting is a signal, and they make
+# a good dashboard panel).
+#
+# catalogue and user expose only /health; shipping's actuator metrics are JSON and
+# not exposed over HTTP by default; dispatch, ratings and web have no Prometheus
+# endpoint; mongodb and redis would need exporter pods.
+#
+# Matches the Services' own labels (app.kubernetes.io/name) and their port "http".
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: robot-shop-apps
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: robot-shop-apps
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: app.kubernetes.io/name       # read from the Service: job="cart" / job="payment"
+  namespaceSelector:
+    matchNames: [robot-shop]
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [cart, payment]
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
